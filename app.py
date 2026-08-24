@@ -11,7 +11,7 @@ DB_PATH = APP_DIR / 'chaplife.db'
 
 st.set_page_config(page_title='ChapLife', page_icon='✨', layout='wide', initial_sidebar_state='collapsed')
 
-BUILD_VERSION='ChapLife Cloud v5.3'
+BUILD_VERSION='ChapLife Cloud v5.3.1'
 
 st.markdown('''
 <style>
@@ -858,7 +858,6 @@ def import_recent_paychecks(selected,source_note="Imported finance sheet"):
         imported+=1
     return imported,skipped
 
-als
 
 def finances():
     st.title('💰 Finances')
