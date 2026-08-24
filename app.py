@@ -70,6 +70,21 @@ def init_db():
     CREATE TABLE IF NOT EXISTS career_tasks (id INTEGER PRIMARY KEY AUTOINCREMENT, task_key TEXT UNIQUE, title TEXT, area TEXT, priority TEXT, status TEXT, due_time TEXT, detail TEXT, completed_at TEXT);
     CREATE TABLE IF NOT EXISTS career_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, msg_key TEXT UNIQUE, sender TEXT, subject TEXT, body TEXT, received_time TEXT, read INTEGER DEFAULT 0, flagged INTEGER DEFAULT 0);
     CREATE TABLE IF NOT EXISTS career_sent (id INTEGER PRIMARY KEY AUTOINCREMENT, sent_time TEXT, recipient TEXT, cc TEXT, subject TEXT, body TEXT);
+    CREATE TABLE IF NOT EXISTS career_reaction_queue (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        source_sent_id INTEGER,
+        due_minute INTEGER,
+        sender TEXT,
+        subject TEXT,
+        body TEXT,
+        reaction_type TEXT,
+        task_key TEXT,
+        task_title TEXT,
+        task_area TEXT,
+        task_priority TEXT,
+        task_due_time TEXT,
+        task_detail TEXT
+    );
     CREATE TABLE IF NOT EXISTS career_activity (id INTEGER PRIMARY KEY AUTOINCREMENT, activity_time TEXT, activity_type TEXT, title TEXT, detail TEXT);
     CREATE TABLE IF NOT EXISTS career_rfis (id INTEGER PRIMARY KEY AUTOINCREMENT, rfi_no TEXT, subject TEXT, drawing_ref TEXT, question TEXT, impact TEXT, status TEXT, submitted_time TEXT, response TEXT);
     CREATE TABLE IF NOT EXISTS career_notes (id INTEGER PRIMARY KEY AUTOINCREMENT, topic TEXT, note TEXT, created_at TEXT);
@@ -140,7 +155,7 @@ def goto(p): st.session_state.page=p
 
 pages = {
  'Home':'🏠', 'Finances':'💰', 'Food & Nutrition':'🥗', 'Grocery Shopping':'🛒', 'My Trainer':'🏋🏾‍♀️',
- 'Water & Jug Puzzles':'💧', 'Vocabulary':'📖', 'Growth Lab':'🌱', 'Conversation & Current Events':'💬', 'Health & Life':'❤️', 'Career Simulator':'🏗️', 'My Progress':'📈'
+ 'Water & Jug Puzzles':'💧', 'Vocabulary':'📖', 'Growth Lab':'🌱', 'Conversation & Current Events':'💬', 'Health & Life':'❤️', 'Career Simulator':'🏗️', 'My Progress':'📈', 'Settings':'⚙️'
 }
 
 nav_items=list(pages.items())
@@ -1314,7 +1329,10 @@ def sim_time(state):
     h=state["minutes"]//60; m=state["minutes"]%60
     return f"{h%12 or 12}:{m:02d} {'AM' if h<12 else 'PM'}"
 def advance_sim(state,mins=10):
-    if not state["paused"] and not state["clocked_out"]: state["minutes"]=min(1020,state["minutes"]+mins); save_sim(state)
+    if not state["paused"] and not state["clocked_out"]:
+        state["minutes"]=min(1020,state["minutes"]+mins)
+        save_sim(state)
+        career_process_reaction_queue(state)
 
 
 TRAINING_GUIDES={
@@ -1367,6 +1385,172 @@ def training_box(topic,state):
 def career_activity(state,kind,title,detail=""):
     execute("INSERT INTO career_activity(activity_time,activity_type,title,detail) VALUES(?,?,?,?)",(sim_time(state),kind,title,detail))
 
+
+def _career_time_from_minutes(mins):
+    h=mins//60; m=mins%60
+    return f"{h%12 or 12}:{m:02d} {'AM' if h<12 else 'PM'}"
+
+def _email_quality(subject,body):
+    txt=(subject+" "+body).lower()
+    score=0
+    if len(subject.strip())>=8: score+=1
+    if len(body.strip())>=45: score+=1
+    if any(x in txt for x in ["please","can you","confirm","review","send","provide","advise","respond"]): score+=1
+    if any(x in txt for x in ["today","by ","am","pm","deadline","before","due"]): score+=1
+    if any(x in txt for x in ["rfi","drawing","a-","e-","spec","pay app","submittal","inspection","schedule","rooms"]): score+=1
+    return score
+
+def _queue_reaction(source_sent_id,due_minute,sender,subject,body,reaction_type="Reply",
+                    task_key=None,task_title=None,task_area=None,task_priority=None,task_due_time=None,task_detail=None):
+    execute("""INSERT INTO career_reaction_queue(
+        source_sent_id,due_minute,sender,subject,body,reaction_type,
+        task_key,task_title,task_area,task_priority,task_due_time,task_detail
+    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+    (source_sent_id,due_minute,sender,subject,body,reaction_type,
+     task_key,task_title,task_area,task_priority,task_due_time,task_detail))
+
+def career_schedule_email_reactions(state,sent_id,recipient,cc,subject,body):
+    """Create realistic delayed reactions to an outgoing project email."""
+    now=int(state["minutes"])
+    txt=(subject+" "+body).lower()
+    cc_txt=(cc or "").lower()
+    quality=_email_quality(subject,body)
+
+    # Poor/unclear project email: recipient asks for clarification instead of magically knowing.
+    if quality<=2:
+        _queue_reaction(
+            sent_id,now+5,recipient,"RE: "+(subject or "Your message"),
+            "I saw your email, but I’m not clear on what you need from me. Can you send the specific document/location, requested action, and when you need the response?",
+            "Clarification",
+            task_key=f"EMAILCLARIFY_{sent_id}",task_title="Clarify outgoing email",
+            task_area="Communication",task_priority="High",task_due_time=_career_time_from_minutes(now+25),
+            task_detail="Recipient could not act on the original email. Rewrite it with a clear request, project reference, and deadline."
+        )
+        return
+
+    # Architect / design-team behavior.
+    if "Avery Chen" in recipient:
+        if "rfi" in txt or "drawing" in txt or "receptacle" in txt or "outlet" in txt:
+            _queue_reaction(sent_id,now+4,"Avery Chen · Architect","RE: "+subject,
+                            "Received. I’m pulling the referenced sheets now. I’ll confirm whether this can be answered directly or needs a formal RFI revision.",
+                            "Acknowledgment")
+            if any(x in txt for x in ["a-402","e-201","18","24","rooms 204","rooms 204–210"]):
+                _queue_reaction(sent_id,now+18,"Avery Chen · Architect","RE: "+subject,
+                                'I reviewed A-402 and E-201. Use 18" AFF in Rooms 204–210. I’ll carry the clarification into the next bulletin. Please make sure the field team receives this response.',
+                                "Design Response",
+                                task_key=f"DISTRIBUTE_{sent_id}",task_title="Distribute architect clarification to field",
+                                task_area="RFIs",task_priority="URGENT",task_due_time=_career_time_from_minutes(now+30),
+                                task_detail='Architect answered the mounting-height conflict. Send the clarification to Dana/Apex and update the RFI log.')
+            else:
+                _queue_reaction(sent_id,now+16,"Avery Chen · Architect","RE: "+subject,
+                                "I need the exact drawing/detail references and affected rooms before I can issue a response. Please revise the request and resend.",
+                                "Revision Request",
+                                task_key=f"REVISION_{sent_id}",task_title="Revise design clarification request",
+                                task_area="RFIs",task_priority="High",task_due_time=_career_time_from_minutes(now+35),
+                                task_detail="Architect needs exact references/location before responding.")
+        else:
+            _queue_reaction(sent_id,now+9,"Avery Chen · Architect","RE: "+subject,
+                            "Received. Can you confirm which drawing/spec section this relates to so I can route it to the right person?",
+                            "Follow-up")
+
+    # Superintendent behavior: field-focused, direct, time-sensitive.
+    elif "Dana Lewis" in recipient:
+        if any(x in txt for x in ["inspection","field","rfi","rough-in","electrical","framing"]):
+            _queue_reaction(sent_id,now+3,"Dana Lewis · Superintendent","RE: "+subject,
+                            "Got it. I’ll hold the affected crew/area until we have documented direction. Send me the RFI/confirmation number as soon as you have it.",
+                            "Field Response")
+            _queue_reaction(sent_id,now+20,"Dana Lewis · Superintendent","Field status follow-up",
+                            "Any update? The crew is about to run out of work in the alternate area. I need to know whether we can release Rooms 204–210.",
+                            "Pressure Follow-up",
+                            task_key=f"FIELDUPDATE_{sent_id}",task_title="Give Superintendent field-status update",
+                            task_area="Field Coordination",task_priority="URGENT",task_due_time=_career_time_from_minutes(now+30),
+                            task_detail="Dana is waiting on direction before releasing the crew.")
+        else:
+            _queue_reaction(sent_id,now+6,"Dana Lewis · Superintendent","RE: "+subject,
+                            "Copy. Tell me what you need verified in the field and I’ll get you an answer.",
+                            "Reply")
+
+    # PM behavior: prioritization, accountability, documentation.
+    elif "Marcus Reed" in recipient:
+        if "status" in txt or "update" in txt or "rfi" in txt:
+            _queue_reaction(sent_id,now+5,"Marcus Reed · Project Manager","RE: "+subject,
+                            "Thanks. Keep the RFI and field impact tied together in the update. If the architect doesn’t respond by the time you promised, follow up before it becomes tomorrow’s schedule problem.",
+                            "PM Coaching")
+        elif "pay" in txt or "cost" in txt or "billing" in txt:
+            _queue_reaction(sent_id,now+5,"Marcus Reed · Project Manager","RE: "+subject,
+                            "Good. Do not release the pay app until the billed percentage is supported. Document the discrepancy and copy Accounting on the resolution.",
+                            "PM Direction",
+                            task_key=f"COSTFOLLOW_{sent_id}",task_title="Document pay-app resolution",
+                            task_area="Cost",task_priority="High",task_due_time=_career_time_from_minutes(now+45),
+                            task_detail="PM wants documented support/correction before payment is released.")
+        else:
+            _queue_reaction(sent_id,now+7,"Marcus Reed · Project Manager","RE: "+subject,
+                            "Received. What is the project impact and what do you recommend as the next coordination step?",
+                            "PM Follow-up",
+                            task_key=f"PMFOLLOW_{sent_id}",task_title="Respond to PM with impact + next step",
+                            task_area="Coordination",task_priority="High",task_due_time=_career_time_from_minutes(now+35),
+                            task_detail="PM expects you to connect the issue to cost/schedule/field impact and propose the next coordination action.")
+
+    # Subcontractor behavior: practical, may push for quick direction / payment.
+    elif "Apex Electric" in recipient:
+        if "pay" in txt or "billing" in txt or "percent" in txt:
+            _queue_reaction(sent_id,now+6,"Luis Ortega · Apex Electric PM","RE: "+subject,
+                            "We billed 90% because material is onsite and rough-in is substantially complete in the released areas. I can send the stored-material backup and marked-up progress plan. Tell me which line item you’re holding.",
+                            "Subcontractor Pushback")
+            _queue_reaction(sent_id,now+17,"Luis Ortega · Apex Electric PM","Apex backup uploaded",
+                            "I sent the stored-material invoice and progress markup. Please confirm whether Accounting can keep the undisputed portion moving this cycle.",
+                            "Backup Received",
+                            task_key=f"APEXBACKUP_{sent_id}",task_title="Review Apex backup and separate disputed amount",
+                            task_area="Cost",task_priority="High",task_due_time=_career_time_from_minutes(now+40),
+                            task_detail="Apex supplied backup and is asking whether the undisputed portion can proceed.")
+        elif "rfi" in txt or "outlet" in txt or "receptacle" in txt:
+            _queue_reaction(sent_id,now+4,"Luis Ortega · Apex Electric PM","RE: "+subject,
+                            "Understood. We moved the crew to the west side for now. Please send the architect response as soon as it lands so we don’t lose the afternoon.",
+                            "Trade Response")
+        else:
+            _queue_reaction(sent_id,now+8,"Luis Ortega · Apex Electric PM","RE: "+subject,
+                            "Received. I’ll check with the foreman and get back to you.",
+                            "Acknowledgment")
+
+    # Accounting behavior: process/backup focused.
+    elif "Accounting" in recipient:
+        if "pay" in txt or "billing" in txt or "apex" in txt:
+            _queue_reaction(sent_id,now+5,"Jasmine Cole · Accounting","RE: "+subject,
+                            "I placed the pay application on hold. Please send the PM-approved amount and any revised backup by 2:30 PM if you want it included in today’s payment run.",
+                            "Accounting Hold",
+                            task_key=f"ACCT_{sent_id}",task_title="Send Accounting approved pay-app amount",
+                            task_area="Cost",task_priority="High",task_due_time="2:30 PM",
+                            task_detail="Accounting needs the approved/revised amount and backup before the payment-run cutoff.")
+        else:
+            _queue_reaction(sent_id,now+7,"Jasmine Cole · Accounting","RE: "+subject,
+                            "Received. Please attach the supporting document or reference the PO/subcontract number so I can process it.",
+                            "Documentation Request")
+
+    # CC consequences and cross-talk.
+    issue_is_field=any(x in txt for x in ["rfi","field","electrical","inspection","rough-in","framing"])
+    if issue_is_field and "dana" not in cc_txt and "Dana Lewis" not in recipient:
+        _queue_reaction(sent_id,now+14,"Dana Lewis · Superintendent","Why wasn’t field copied?",
+                        "I heard this issue was already sent out. Please include me on anything that is holding field work so I’m not finding out secondhand.",
+                        "CC Consequence")
+    if ("pay" in txt or "billing" in txt or "cost" in txt) and "accounting" not in cc_txt and "Accounting" not in recipient:
+        _queue_reaction(sent_id,now+22,"Jasmine Cole · Accounting","Pay-app status?",
+                        "Marcus mentioned there may be a billing hold. Please copy Accounting on the documented resolution so we don’t miss the cutoff.",
+                        "CC Consequence")
+
+def career_process_reaction_queue(state):
+    due=rows("SELECT * FROM career_reaction_queue WHERE due_minute<=? ORDER BY due_minute,id",(int(state["minutes"]),))
+    for q in due:
+        key=f"AUTO_{q['id']}"
+        if not rows("SELECT id FROM career_messages WHERE msg_key=?",(key,)):
+            execute("INSERT INTO career_messages(msg_key,sender,subject,body,received_time) VALUES(?,?,?,?,?)",
+                    (key,q["sender"],q["subject"],q["body"],_career_time_from_minutes(q["due_minute"])))
+            career_activity(state,"Incoming",q["subject"],q["body"])
+            if q["task_key"]:
+                execute("""INSERT OR IGNORE INTO career_tasks(task_key,title,area,priority,status,due_time,detail)
+                           VALUES(?,?,?,?,?,?,?)""",
+                        (q["task_key"],q["task_title"],q["task_area"],q["task_priority"],"Open",q["task_due_time"],q["task_detail"]))
+        execute("DELETE FROM career_reaction_queue WHERE id=?",(q["id"],))
+
 def career_reactions(state):
     # Events appear as the simulated clock crosses realistic times.
     mins=state["minutes"]
@@ -1382,7 +1566,7 @@ def career_reactions(state):
             career_activity(state,"Incoming",subject,body)
 
 def career():
-    career_seed_day(); state=sim_state(); career_reactions(state)
+    career_seed_day(); state=sim_state(); career_process_reaction_queue(state); career_reactions(state)
     st.markdown(f"<div class='hero'><h1>🏗️ Northline Construction · Project Hub</h1><p><b>{state['project']}</b> · {state['project_no']} · {state['phase']} · Simulated Day {state['day']}</p></div>",unsafe_allow_html=True)
     top=st.columns(4); top[0].metric("Simulated time",sim_time(state)); top[1].metric("Unread",rows("SELECT COUNT(*) n FROM career_messages WHERE read=0")[0]["n"]); top[2].metric("Open tasks",rows("SELECT COUNT(*) n FROM career_tasks WHERE status!='Done'")[0]["n"]); top[3].metric("Mode",state["mode"])
     if state["paused"]:
@@ -1393,11 +1577,13 @@ def career():
         if st.button("▶ Resume Workday",type="primary",use_container_width=True): state["paused"]=False; save_sim(state); st.rerun()
         if st.button("🏠 Save & Exit to ChapLife",use_container_width=True): goto("Home"); st.rerun()
         return
-    controls=st.columns(4)
+    controls=st.columns(5)
     if controls[0].button("⏸ Pause Workday",use_container_width=True): state["paused"]=True; save_sim(state); st.rerun()
     if controls[1].button("💾 Save & Exit",use_container_width=True): save_sim(state); goto("Home"); st.rerun()
-    if controls[2].button("🕔 Clock Out",use_container_width=True): state["clocked_out"]=True; save_sim(state); st.success("Workday saved. Unfinished work remains for your next simulated day.")
-    mode=controls[3].selectbox("Assistance",["Training","Assisted","Independent"],index=["Training","Assisted","Independent"].index(state.get("mode","Training")),label_visibility="collapsed")
+    if controls[2].button("⏩ Work 10 Min",use_container_width=True):
+        advance_sim(state,10); career_reactions(state); st.rerun()
+    if controls[3].button("🕔 Clock Out",use_container_width=True): state["clocked_out"]=True; save_sim(state); st.success("Workday saved. Unfinished work remains for your next simulated day.")
+    mode=controls[4].selectbox("Assistance",["Training","Assisted","Independent"],index=["Training","Assisted","Independent"].index(state.get("mode","Training")),label_visibility="collapsed")
     if mode!=state.get("mode"): state["mode"]=mode; save_sim(state)
     tabs=st.tabs(["🖥️ Today","📧 Inbox","✅ Tasks","📄 RFI Desk","💵 Cost Desk","📅 Calendar","👥 Team","📚 Training Library","🔥 Scenario Lab","📈 Performance"])
     with tabs[0]:
@@ -1411,8 +1597,19 @@ def career():
             with st.container(border=True):
                 st.markdown(f"**{t['title']}** · {t['priority']} · due {t['due_time']} — {t['detail']}")
         if state["mode"]=="Training": st.info("Training tip: prioritize by consequence. A prerequisite that can stop field work may outrank an administrative deadline that can be coordinated.")
+        st.markdown("#### Live project activity")
+        recent=rows("SELECT * FROM career_activity ORDER BY id DESC LIMIT 12")
+        if not recent:
+            st.caption("Your submissions and project reactions will appear here.")
+        for a in recent:
+            with st.container(border=True):
+                st.markdown(f"**{a['activity_time']} · {a['activity_type']} — {a['title']}**")
+                if a['detail']: st.caption(a['detail'])
     with tabs[1]:
         st.subheader("Project Inbox")
+        pending=rows("SELECT * FROM career_reaction_queue ORDER BY due_minute,id")
+        if pending:
+            st.caption(f"Project activity is live • {len(pending)} response/follow-up event{'s' if len(pending)!=1 else ''} currently developing in simulated time.")
         for m in rows("SELECT * FROM career_messages ORDER BY id DESC"):
             icon="●" if not m["read"] else "○"
             with st.expander(f"{icon} {m['received_time']} · {m['sender']} — {m['subject']}"):
@@ -1427,10 +1624,13 @@ def career():
             body=st.text_area("Message",height=130)
             sent=st.form_submit_button("Send Email",use_container_width=True)
             if sent:
-                execute("INSERT INTO career_sent(sent_time,recipient,cc,subject,body) VALUES(?,?,?,?,?)",(sim_time(state),recipient,", ".join(cc),subject,body))
-                career_activity(state,"Email","Email sent — "+(subject or "No subject"),"To "+recipient)
-                advance_sim(state,8); career_reactions(state)
-                st.session_state["career_sent_ok"]=f"✓ SENT at {sim_time(state)}. It is saved in Sent Mail."
+                sent_id=execute("INSERT INTO career_sent(sent_time,recipient,cc,subject,body) VALUES(?,?,?,?,?)",(sim_time(state),recipient,", ".join(cc),subject,body))
+                career_activity(state,"Email","Email sent — "+(subject or "No subject"),"To "+recipient+" | CC: "+(", ".join(cc) if cc else "none"))
+                career_schedule_email_reactions(state,sent_id,recipient,", ".join(cc),subject,body)
+                sent_at=sim_time(state)
+                advance_sim(state,8)
+                career_reactions(state)
+                st.session_state["career_sent_ok"]=f"✓ SENT at {sent_at}. It is saved in Sent Mail. The project is continuing to react as simulated time moves."
         if st.session_state.get("career_sent_ok"): st.success(st.session_state.pop("career_sent_ok"))
         sentmail=rows("SELECT * FROM career_sent ORDER BY id DESC LIMIT 10")
         if sentmail:
@@ -1543,7 +1743,7 @@ def career():
         with st.expander("🗑️ Reset simulated project"):
             confirm=st.checkbox("I understand this restarts the construction simulation")
             if st.button("Reset Career Simulator",disabled=not confirm):
-                for tbl in ["career_tasks","career_messages","career_log","career_sent","career_activity","career_rfis","career_notes"]: reset_table(tbl)
+                for tbl in ["career_tasks","career_messages","career_log","career_sent","career_activity","career_rfis","career_notes","career_reaction_queue"]: reset_table(tbl)
                 execute("DELETE FROM settings WHERE key='career_workday'"); st.rerun()
 
 
@@ -1729,12 +1929,183 @@ def health():
         else:
             st.info("Complete at least 3 daily health logs for your first 2-good-things + 1-improvement summary.")
 
+
+# ---------- Settings ----------
+def settings_page():
+    st.title('⚙️ Settings')
+    st.caption('Control what ChapLife shows, how planning works, and future account integrations.')
+
+    tabs=st.tabs(['Display & Progress','📅 Calendar','🥗 Meal Planning','🏋🏾‍♀️ Workout Planning','❤️ Health','Data & Privacy'])
+
+    with tabs[0]:
+        st.subheader('My Progress sections')
+        st.write('Hide sections you do not want to see in **My Progress**. Your saved information is not deleted.')
+        show_growth=st.toggle('Show Growth in My Progress',value=bool(get_setting('progress_show_growth',True)),key='set_progress_growth')
+        show_convo=st.toggle('Show Conversation in My Progress',value=bool(get_setting('progress_show_conversation',True)),key='set_progress_convo')
+        if show_growth!=bool(get_setting('progress_show_growth',True)):
+            set_setting('progress_show_growth',show_growth); st.rerun()
+        if show_convo!=bool(get_setting('progress_show_conversation',True)):
+            set_setting('progress_show_conversation',show_convo); st.rerun()
+
+        st.divider()
+        st.subheader('Dashboard visibility')
+        st.caption('These controls can later be expanded so you can hide whole dashboard cards too.')
+        st.info('Growth Lab and Conversation remain available from the main navigation even when hidden from My Progress.')
+
+    with tabs[1]:
+        st.subheader('📅 Google Calendar')
+        st.warning('Calendar is not connected directly to this hosted ChapLife app yet.')
+        st.write('Your Google Calendar connection in ChatGPT is separate from ChapLife. ChapLife needs its **own secure Google sign-in/OAuth connection** before it can read your schedule automatically.')
+        st.markdown('**Once connected, ChapLife will be allowed to use calendar events for:**')
+        use_meals=st.toggle('Adjust meal plans around busy days',value=bool(get_setting('calendar_meal_planning',True)),key='calmeal')
+        use_workouts=st.toggle('Adjust workout length/timing around events',value=bool(get_setting('calendar_workout_planning',True)),key='calwork')
+        away=st.toggle('Flag days when I may need a meal away from home',value=bool(get_setting('calendar_away_meals',True)),key='calaway')
+        travel=st.number_input('Default travel buffer around events (minutes)',min_value=0,max_value=180,step=5,value=int(get_setting('calendar_travel_buffer',30) or 30))
+        if st.button('Save Calendar Planning Preferences',use_container_width=True):
+            set_setting('calendar_meal_planning',use_meals)
+            set_setting('calendar_workout_planning',use_workouts)
+            set_setting('calendar_away_meals',away)
+            set_setting('calendar_travel_buffer',travel)
+            st.success('Calendar planning preferences saved.')
+        st.info('Next cloud step: add a **Connect Google Calendar** button here using Google OAuth. No Google password will be stored in ChapLife.')
+
+    with tabs[2]:
+        st.subheader('🥗 Meal planning preferences')
+        meals_per_day=st.selectbox('Typical meals per day',[2,3,4,5],index=max(0,min(3,int(get_setting('meal_count',3) or 3)-2)))
+        cook_time=st.selectbox('Typical cooking time',['10–15 minutes','20–30 minutes','30–45 minutes','I am flexible'],index=0)
+        leftovers=st.toggle('Use leftovers to reduce waste',value=bool(get_setting('meal_use_leftovers',True)))
+        if st.button('Save Meal Preferences',use_container_width=True):
+            set_setting('meal_count',meals_per_day); set_setting('meal_cook_time',cook_time); set_setting('meal_use_leftovers',leftovers)
+            st.success('Meal preferences saved.')
+
+    with tabs[3]:
+        st.subheader('🏋🏾‍♀️ Workout planning preferences')
+        busy_length=st.selectbox('Workout length on busy days',['10 minutes','15 minutes','20 minutes','30 minutes'],index=2)
+        normal_length=st.selectbox('Workout length on normal days',['20 minutes','30 minutes','40 minutes','45 minutes','60 minutes'],index=2)
+        calendar_adjust=st.toggle('Let calendar busyness shorten a workout suggestion',value=bool(get_setting('workout_calendar_adjust',True)))
+        if st.button('Save Workout Preferences',use_container_width=True):
+            set_setting('workout_busy_length',busy_length); set_setting('workout_normal_length',normal_length); set_setting('workout_calendar_adjust',calendar_adjust)
+            st.success('Workout preferences saved.')
+
+    with tabs[4]:
+        st.subheader('❤️ Health preferences')
+        st.write('Control how health information is used in planning.')
+        cycle_adjust=st.toggle('Allow logged energy/cycle information to suggest lighter workout options',value=bool(get_setting('health_cycle_adjust',True)))
+        samsung=st.toggle('Use Samsung Health activity history in progress summaries',value=bool(get_setting('health_use_samsung',True)))
+        nutrients=st.toggle('Include supplement-label nutrients in nutrient summaries',value=bool(get_setting('health_use_supplement_nutrients',True)))
+        if st.button('Save Health Preferences',use_container_width=True):
+            set_setting('health_cycle_adjust',cycle_adjust); set_setting('health_use_samsung',samsung); set_setting('health_use_supplement_nutrients',nutrients)
+            st.success('Health preferences saved.')
+
+    with tabs[5]:
+        st.subheader('Data & privacy')
+        st.write('ChapLife is currently hosted from GitHub, but personal data should live in a private cloud database—not in the public repository.')
+        st.warning('Do not upload `chaplife.db`, financial exports, health screenshots, medicine-label photos, passwords, or API credentials to the public GitHub repository.')
+        st.info('The next sync step will move saved records to private cloud storage so phone and computer use the same data.')
+
 # ---------- Progress ----------
 def progress():
     st.title('📈 My Progress')
-    ptab=st.tabs(['Overview','Money','Nutrition','Fitness & Water','Growth & Conversation','Career','Health'])
-    start=(date.today()-timedelta(days=30)).isoformat(); workouts=df_from('SELECT * FROM workouts WHERE workout_date>=?',(start,)); meals=df_from('SELECT * FROM meals WHERE meal_date>=?',(start,)); careerlog=df_from('SELECT * FROM career_log WHERE log_date>=?',(start,)); growthlog=df_from('SELECT * FROM growth_log WHERE log_date>=?',(start,)); goals=df_from('SELECT * FROM savings_goals'); water30=df_from('SELECT log_date,SUM(ounces) ounces FROM water_log WHERE log_date>=? GROUP BY log_date',(start,))
-    with ptab[6]:
+    show_growth=bool(get_setting('progress_show_growth',True))
+    show_convo=bool(get_setting('progress_show_conversation',True))
+
+    tab_names=['Overview','Money','Nutrition','Fitness & Water']
+    if show_growth: tab_names.append('Growth')
+    if show_convo: tab_names.append('Conversation')
+    tab_names.extend(['Career','Health'])
+    ptab=st.tabs(tab_names)
+    tabs=dict(zip(tab_names,ptab))
+
+    start=(date.today()-timedelta(days=30)).isoformat()
+    workouts=df_from('SELECT * FROM workouts WHERE workout_date>=?',(start,))
+    meals=df_from('SELECT * FROM meals WHERE meal_date>=?',(start,))
+    careerlog=df_from('SELECT * FROM career_log WHERE log_date>=?',(start,))
+    growthlog=df_from('SELECT * FROM growth_log WHERE log_date>=?',(start,))
+    goals=df_from('SELECT * FROM savings_goals')
+    water30=df_from('SELECT log_date,SUM(ounces) ounces FROM water_log WHERE log_date>=? GROUP BY log_date',(start,))
+    tx=df_from('SELECT * FROM finance_transactions WHERE tx_date>=?',(start,))
+
+    with tabs['Overview']:
+        c=st.columns(5)
+        c[0].metric('Workouts / 30d',len(workouts))
+        c[1].metric('Meals logged / 30d',len(meals))
+        c[2].metric('Savings progress',money(goals.current_amount.sum() if not goals.empty else 0))
+        c[3].metric('Career scenarios',len(careerlog))
+        c[4].metric('Jug levels passed',len(get_setting('jug_passed',[]) or []))
+        st.caption('Use ⚙️ Settings to hide Growth or Conversation from My Progress without deleting their data.')
+
+    with tabs['Money']:
+        st.subheader('💰 Money Progress')
+        if tx.empty:
+            st.info('Log transactions to see detailed money progress.')
+        else:
+            expenses=tx[tx.tx_type=='Expense'] if 'tx_type' in tx.columns else tx.iloc[0:0]
+            income=tx[tx.tx_type=='Income'] if 'tx_type' in tx.columns else tx.iloc[0:0]
+            c=st.columns(3)
+            c[0].metric('Income / 30d',money(income.amount.sum() if not income.empty else 0))
+            c[1].metric('Expenses / 30d',money(expenses.amount.sum() if not expenses.empty else 0))
+            c[2].metric('Net logged',money((income.amount.sum() if not income.empty else 0)-(expenses.amount.sum() if not expenses.empty else 0)))
+            if not expenses.empty and 'category' in expenses.columns:
+                st.bar_chart(expenses.groupby('category').amount.sum())
+        if not goals.empty:
+            st.markdown('#### Savings goals')
+            for _,g in goals.iterrows():
+                st.write(f"**{g['name']}** — {money(g.current_amount)} / {money(g.target_amount)}")
+                st.progress(min(1,g.current_amount/g.target_amount if g.target_amount else 0))
+
+    with tabs['Nutrition']:
+        st.subheader('🥗 Nutrition Progress')
+        if meals.empty: st.info('Log/check off meals to see detailed nutrition progress.')
+        else:
+            daily=meals.groupby('meal_date')[['calories','protein']].sum()
+            st.line_chart(daily)
+            c=st.columns(3)
+            c[0].metric('Meals logged',len(meals))
+            c[1].metric('Avg calories logged/day',f"{daily.calories.mean():.0f}")
+            c[2].metric('Avg protein logged/day',f"{daily.protein.mean():.0f} g")
+
+    with tabs['Fitness & Water']:
+        st.subheader('🏋🏾‍♀️ Fitness & 💧 Water')
+        if not workouts.empty:
+            st.markdown('#### Workout minutes')
+            st.bar_chart(workouts.groupby('workout_date').minutes.sum())
+        else: st.info('Complete workouts to see fitness trends.')
+        if not water30.empty:
+            st.markdown('#### Water')
+            st.line_chart(water30.set_index('log_date'))
+        passed=get_setting('jug_passed',[]) or []
+        st.metric('Jug puzzle levels passed',len(passed),f'Highest unlocked: {get_setting("jug_unlocked",1)}')
+
+    if show_growth:
+        with tabs['Growth']:
+            st.subheader('🌱 Growth Progress')
+            if growthlog.empty: st.info('Complete Growth Lab exercises to see detailed progress.')
+            else:
+                st.metric('Growth entries / 30d',len(growthlog))
+                st.dataframe(growthlog,use_container_width=True,hide_index=True)
+
+    if show_convo:
+        with tabs['Conversation']:
+            st.subheader('💬 Conversation Progress')
+            convo=df_from('SELECT * FROM confidence_log WHERE log_date>=? ORDER BY log_date DESC',(start,))
+            if convo.empty:
+                st.info('Complete conversation practice to begin detailed conversation progress.')
+            else:
+                st.metric('Conversation practice entries / 30d',len(convo))
+                st.dataframe(convo,use_container_width=True,hide_index=True)
+            st.caption('Future summaries will include follow-up questions, repeated phrases, contribution of your own thoughts, networking, romance, and group-conversation skills.')
+
+    with tabs['Career']:
+        st.subheader('🏗️ Career Progress')
+        acts=df_from('SELECT * FROM career_activity ORDER BY id DESC')
+        rfis=df_from('SELECT * FROM career_rfis ORDER BY id DESC')
+        c=st.columns(3)
+        c[0].metric('Career log entries',len(careerlog))
+        c[1].metric('Project activities',len(acts))
+        c[2].metric('RFIs created',len(rfis))
+        if not acts.empty: st.dataframe(acts.head(20),use_container_width=True,hide_index=True)
+
+    with tabs['Health']:
         st.subheader('❤️ Health Detail')
         hd=df_from('SELECT * FROM health_daily WHERE log_date>=? ORDER BY log_date',(start,))
         doses=df_from('SELECT * FROM medicine_doses WHERE dose_date>=? ORDER BY dose_date',(start,))
@@ -1746,17 +2117,10 @@ def progress():
             c[1].metric('Avg active calories',f"{hd.active_calories.fillna(0).mean():,.0f}")
             c[2].metric('Avg active minutes',f"{hd.active_minutes.fillna(0).mean():.0f}")
             c[3].metric('Avg sleep',f"{hd.sleep_hours.fillna(0).mean():.1f} hr")
-            st.line_chart(hd.set_index('log_date')[['steps','active_calories']])
+            if {'steps','active_calories'}.issubset(hd.columns):
+                st.line_chart(hd.set_index('log_date')[['steps','active_calories']])
         st.write(f"**Medicine/supplement doses logged:** {len(doses)}")
         st.write(f"**Cycle entries logged:** {len(cycles)}")
-    c=st.columns(5); c[0].metric('Workouts / 30d',len(workouts)); c[1].metric('Meals logged / 30d',len(meals)); c[2].metric('Savings progress',money(goals.current_amount.sum() if not goals.empty else 0)); c[3].metric('Career scenarios',len(careerlog)); c[4].metric('Growth entries',len(growthlog))
-    if not meals.empty: st.subheader('Food logging'); daily=meals.groupby('meal_date')[['calories','protein']].sum(); st.line_chart(daily)
-    if not water30.empty: st.subheader('Water'); st.line_chart(water30.set_index('log_date'))
-    if not workouts.empty: st.subheader('Workout minutes'); st.bar_chart(workouts.groupby('workout_date').minutes.sum())
-    if not goals.empty:
-        st.subheader('Savings goals')
-        for _,g in goals.iterrows(): st.write(f"**{g['name']}** — {money(g.current_amount)} / {money(g.target_amount)}"); st.progress(min(1,g.current_amount/g.target_amount if g.target_amount else 0))
-    passed=get_setting('jug_passed',[]) or []; st.metric('Jug puzzle levels passed',len(passed),f'Highest unlocked: {get_setting("jug_unlocked",1)}')
 
 # ---------- Render ----------
 page=st.session_state.page
@@ -1772,3 +2136,4 @@ elif page=='Conversation & Current Events': current_events()
 elif page=='Health & Life': health()
 elif page=='Career Simulator': career()
 elif page=='My Progress': progress()
+elif page=='Settings': settings_page()
