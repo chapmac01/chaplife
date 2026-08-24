@@ -1718,6 +1718,22 @@ def career_task_status_reaction(state,t,old_status,new_status):
 
     return "ok"
 
+
+def reset_career_simulation():
+    """Reset the entire Career Simulator to a fresh Day 1 without touching the rest of ChapLife."""
+    for tbl in [
+        "career_tasks","career_messages","career_sent","career_activity",
+        "career_rfis","career_notes","career_log","career_reaction_queue"
+    ]:
+        reset_table(tbl)
+    # Remove saved workday state so sim_state() rebuilds the original morning.
+    execute("DELETE FROM settings WHERE key IN (?,?)",("career_workday","career_scenario"))
+    # Clear related session-state notices/selections so old UI state does not bleed into the new run.
+    for k in list(st.session_state.keys()):
+        if k.startswith(("career_","result_","choice_","stat_")):
+            try: del st.session_state[k]
+            except: pass
+
 def career():
     state=sim_state(); career_seed_day(); career_process_reaction_queue(state); career_reactions(state)
     st.markdown(f"<div class='hero'><h1>🏗️ Northline Construction · Project Hub</h1><p><b>{state['project']}</b> · {state['project_no']} · {state['phase']} · Simulated Day {state['day']}</p></div>",unsafe_allow_html=True)
@@ -1730,14 +1746,37 @@ def career():
         if st.button("▶ Resume Workday",type="primary",use_container_width=True): state["paused"]=False; save_sim(state); st.rerun()
         if st.button("🏠 Save & Exit to ChapLife",use_container_width=True): goto("Home"); st.rerun()
         return
-    controls=st.columns(5)
+    controls=st.columns(6)
     if controls[0].button("⏸ Pause Workday",use_container_width=True): state["paused"]=True; save_sim(state); st.rerun()
     if controls[1].button("💾 Save & Exit",use_container_width=True): save_sim(state); goto("Home"); st.rerun()
     if controls[2].button("⏩ Work 10 Min",use_container_width=True):
         advance_sim(state,10); career_reactions(state); st.rerun()
     if controls[3].button("🕔 Clock Out",use_container_width=True): state["clocked_out"]=True; save_sim(state); st.success("Workday saved. Unfinished work remains for your next simulated day.")
-    mode=controls[4].selectbox("Assistance",["Training","Assisted","Independent"],index=["Training","Assisted","Independent"].index(state.get("mode","Training")),label_visibility="collapsed")
+    reset_clicked=controls[4].button("🔄 Reset Simulation",use_container_width=True)
+    mode=controls[5].selectbox("Assistance",["Training","Assisted","Independent"],index=["Training","Assisted","Independent"].index(state.get("mode","Training")),label_visibility="collapsed")
+    if reset_clicked:
+        st.session_state["confirm_full_career_reset"]=True
     if mode!=state.get("mode"): state["mode"]=mode; save_sim(state)
+
+    if st.session_state.get("confirm_full_career_reset"):
+        with st.container(border=True):
+            st.error("Reset the ENTIRE Career Simulator?")
+            st.write("This will erase the simulated workday, inbox, sent mail, tasks, RFIs, cost/career activity, scenario results, queued reactions, training notes, and simulator progress. **The rest of ChapLife will not be changed.**")
+            c=st.columns(2)
+            if c[0].button("Yes — Reset Career Simulator",type="primary",use_container_width=True,key="career_reset_yes"):
+                reset_career_simulation()
+                st.session_state["page"]="Career Simulator"
+                st.session_state["career_reset_done"]=True
+                st.rerun()
+            if c[1].button("Cancel",use_container_width=True,key="career_reset_cancel"):
+                st.session_state["confirm_full_career_reset"]=False
+                st.rerun()
+        return
+
+    if st.session_state.get("career_reset_done"):
+        st.success("✅ Career Simulator reset. You are starting fresh from Day 1.")
+        st.session_state["career_reset_done"]=False
+
     tabs=st.tabs(["🖥️ Today","📧 Inbox","✅ Tasks","📄 RFI Desk","💵 Cost Desk","📅 Calendar","👥 Team","📚 Training Library","🔥 Scenario Lab","📈 Performance"])
     with tabs[0]:
         st.subheader("Monday Morning · Project Command Center")
