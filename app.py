@@ -282,7 +282,7 @@ def home():
 
     st.markdown("""
     <style>
-    .st-key-dashcard button{
+    [class*="st-key-dashcard_"] button{
         min-height:188px!important;
         border-radius:20px!important;
         padding:1rem!important;
@@ -299,7 +299,7 @@ def home():
         font-weight:750!important;
     }
     @media(max-width:640px){
-      .st-key-dashcard button{min-height:170px!important;padding:.8rem!important;}
+      [class*="st-key-dashcard_"] button{min-height:170px!important;padding:.8rem!important;}
     }
     </style>
     """,unsafe_allow_html=True)
@@ -310,7 +310,7 @@ def home():
             lines=insights[p]
             label=f"{ic}  {p}\n\n{lines[0]}\n{lines[1]}\n{lines[2]}\n\nOpen →"
             with cc[j]:
-                with st.container(key="dashcard"):
+                with st.container(key=f"dashcard_{rowstart}_{j}"):
                     if st.button(label,use_container_width=True,key="home_"+p):
                         goto(p); st.rerun()
 
