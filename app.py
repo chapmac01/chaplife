@@ -140,7 +140,7 @@ def goto(p): st.session_state.page=p
 
 pages = {
  'Home':'🏠', 'Finances':'💰', 'Food & Nutrition':'🥗', 'Grocery Shopping':'🛒', 'My Trainer':'🏋🏾‍♀️',
- 'Water & Jug Puzzles':'💧', 'Vocabulary':'📖', 'Growth Lab':'🌱', 'Conversation & Current Events':'💬', 'Career Simulator':'🏗️', 'My Progress':'📈'
+ 'Water & Jug Puzzles':'💧', 'Vocabulary':'📖', 'Growth Lab':'🌱', 'Conversation & Current Events':'💬', 'Health & Life':'❤️', 'Career Simulator':'🏗️', 'My Progress':'📈'
 }
 
 nav_items=list(pages.items())
@@ -150,22 +150,174 @@ for start in range(0,len(nav_items),5):
         if cc[i].button(f'{ic} {p}',use_container_width=True,key='nav_'+p): goto(p); st.rerun()
 
 # ---------- Home ----------
+
+def _dashboard_insights():
+    today=date.today()
+    t=today.isoformat()
+    week=(today-timedelta(days=7)).isoformat()
+    month=(today-timedelta(days=30)).isoformat()
+
+    # Finance
+    tx=rows("SELECT * FROM finance_transactions WHERE tx_date>=?",(month,))
+    exp=sum((r["amount"] or 0) for r in tx if r["tx_type"]=="Expense")
+    goals=rows("SELECT * FROM savings_goals")
+    funded=sum((r["current_amount"] or 0) for r in goals)
+    finance=[
+        f"✅ {len(goals)} savings goal{'s' if len(goals)!=1 else ''} being tracked" if goals else "✅ Finance tracking is ready",
+        f"✅ {money(funded)} saved toward goals" if funded>0 else "✅ Bill and paycheck tools are set up",
+        f"🔧 Review this month's {money(exp)} spending" if exp>0 else "🔧 Log a few transactions for a spending insight"
+    ]
+
+    # Food
+    meals=rows("SELECT * FROM meals WHERE meal_date>=?",(week,))
+    eaten=[r for r in meals if r["eaten"]]
+    food=[
+        f"✅ {len(eaten)} planned meal{'s' if len(eaten)!=1 else ''} completed this week" if meals else "✅ Meal planner is ready",
+        f"✅ {len(meals)} meal{'s' if len(meals)!=1 else ''} on your recent plan" if meals else "✅ Recipes can build your shopping list",
+        "🔧 Complete/check off more planned meals" if meals and len(eaten)<len(meals) else "🔧 Build your next simple meal plan"
+    ]
+
+    # Grocery
+    groceries=rows("SELECT * FROM grocery_items")
+    checked=[r for r in groceries if r["checked"]]
+    grocery=[
+        f"✅ {len(groceries)} grocery item{'s' if len(groceries)!=1 else ''} currently tracked" if groceries else "✅ Grocery list is ready",
+        f"✅ {len(checked)} item{'s' if len(checked)!=1 else ''} checked off" if checked else "✅ Meal ingredients can populate automatically",
+        "🔧 Check store/quantity before shopping" if groceries else "🔧 Generate a list from your meal plan"
+    ]
+
+    # Trainer
+    w=rows("SELECT * FROM workouts WHERE workout_date>=?",(week,))
+    complete=[r for r in w if r["completed"]]
+    trainer=[
+        f"✅ {len(complete)} workout{'s' if len(complete)!=1 else ''} completed in 7 days" if complete else "✅ Personalized workout builder is ready",
+        "✅ Workout history is being saved" if w else "✅ Routines can match your time and equipment",
+        "🔧 Aim for one more completed workout" if complete else "🔧 Complete your first workout this week"
+    ]
+
+    # Water / jugs
+    water=sum((r["ounces"] or 0) for r in rows("SELECT ounces FROM water_log WHERE log_date=?",(t,)))
+    goal=safe_float(get_setting("water_goal",64))
+    passed=set(get_setting("jug_passed",[]) or [])
+    wateri=[
+        f"✅ {water:.0f} oz logged today" if water else "✅ Daily water tracking is ready",
+        f"✅ {len(passed)} jug level{'s' if len(passed)!=1 else ''} passed" if passed else "✅ 120 jug levels are available",
+        f"🔧 {max(0,goal-water):.0f} oz left to reach today's goal" if water<goal else "🔧 Keep your hydration streak going"
+    ]
+
+    # Vocabulary
+    vp=rows("SELECT * FROM vocab_progress")
+    learned=[r for r in vp if r["learned"]]
+    vocab=[
+        f"✅ {len(learned)} word{'s' if len(learned)!=1 else ''} marked learned" if learned else "✅ Pronunciation practice is ready",
+        f"✅ {len(vp)} vocabulary entr{'ies' if len(vp)!=1 else 'y'} practiced" if vp else "✅ Recall and sentence practice are available",
+        "🔧 Practice one word in your own sentence today"
+    ]
+
+    # Growth
+    gl=rows("SELECT * FROM growth_log WHERE log_date>=?",(week,))
+    growth=[
+        f"✅ {len(gl)} growth practice entr{'ies' if len(gl)!=1 else 'y'} this week" if gl else "✅ Daily advice is available",
+        "✅ Completed practice can guide the next exercise" if gl else "✅ Exercises and examples are ready",
+        "🔧 Complete one practice so ChapLife can adapt the next one"
+    ]
+
+    # Conversation
+    cl=rows("SELECT * FROM confidence_log WHERE log_date>=?",(week,))
+    convo=[
+        f"✅ {len(cl)} conversation practice entr{'ies' if len(cl)!=1 else 'y'} this week" if cl else "✅ Conversation practice is ready",
+        "✅ Current-events and social scenarios are available",
+        "🔧 Practice adding a thought + follow-up question"
+    ]
+
+    # Career
+    ca=rows("SELECT * FROM career_activity")
+    accepted=sum(1 for r in ca if r["activity_type"] in ("RFI","Email","Cost Review","Meeting"))
+    returned=sum(1 for r in ca if "returned" in (r["title"] or "").lower())
+    career=[
+        f"✅ {accepted} project action{'s' if accepted!=1 else ''} logged" if accepted else "✅ Full Project Coordinator workspace is ready",
+        "✅ Training Library and examples stay available",
+        f"🔧 Review {returned} returned item{'s' if returned!=1 else ''}" if returned else "🔧 Keep practicing follow-up and documentation"
+    ]
+
+    # Health
+    hd=rows("SELECT * FROM health_daily WHERE log_date>=?",(week,))
+    doses=rows("SELECT * FROM medicine_doses WHERE dose_date>=?",(week,))
+    health=[
+        f"✅ {len(hd)} health day{'s' if len(hd)!=1 else ''} logged this week" if hd else "✅ Samsung Health import is ready",
+        f"✅ {len(doses)} medicine/supplement dose{'s' if len(doses)!=1 else ''} logged" if doses else "✅ Medicine, vitamin and cycle trackers are ready",
+        "🔧 Log consistently so patterns become more useful"
+    ]
+
+    return {
+        "Finances":finance,"Food & Nutrition":food,"Grocery Shopping":grocery,
+        "My Trainer":trainer,"Water & Jug Puzzles":wateri,"Vocabulary":vocab,
+        "Growth Lab":growth,"Conversation & Current Events":convo,
+        "Career Simulator":career,"Health & Life":health
+    }
+
 def home():
     st.markdown('<div class="hero"><h1>✨ ChapLife</h1><p>Track it • save it • see your progress • build a healthier, stronger life.</p></div>',unsafe_allow_html=True)
-    today=date.today().isoformat(); water=sum(r['ounces'] for r in rows('SELECT ounces FROM water_log WHERE log_date=?',(today,)))
-    water_goal=safe_float(get_setting('water_goal',64)); savings=sum(r['current_amount'] for r in rows('SELECT current_amount FROM savings_goals'))
+
+    today=date.today().isoformat()
+    water=sum(r['ounces'] for r in rows('SELECT ounces FROM water_log WHERE log_date=?',(today,)))
+    water_goal=safe_float(get_setting('water_goal',64))
+    savings=sum(r['current_amount'] for r in rows('SELECT current_amount FROM savings_goals'))
     workouts=rows("SELECT COUNT(*) n FROM workouts WHERE completed=1 AND workout_date>=?",((date.today()-timedelta(days=7)).isoformat(),))[0]['n']
     calories=sum(r['calories'] or 0 for r in rows('SELECT calories FROM meals WHERE meal_date=?',(today,)))
-    c=st.columns(4); c[0].metric('Water today',f'{water:.0f} oz',f'Goal {water_goal:.0f} oz'); c[1].metric('Saved toward goals',money(savings)); c[2].metric('Workouts / 7 days',workouts); c[3].metric('Calories logged',f'{calories:.0f}')
-    st.subheader('My dashboard')
-    grid=[('💰','Finances','Paychecks, bills, debt & savings plans'),('🥗','Food & Nutrition','Meal plans, recipes & calorie tracking'),('🛒','Grocery Shopping','Exact meal-plan shopping list'),('🏋🏾‍♀️','My Trainer','Goal-based routines & workout history'),('💧','Water & Jug Puzzles','Hydration + level-based logic game'),('📖','Vocabulary','Hear it, learn it, remember it'),('🌱','Growth Lab','Daily advice + adaptive practice'),('💬','Conversation & Current Events','Know what’s happening + practice talking'),('🏗️','Career Simulator','Construction coordinator simulation'),('📈','My Progress','See your trends and milestones')]
-    for start in range(0,len(grid),3):
-        cc=st.columns(3)
-        for j,(ic,p,desc) in enumerate(grid[start:start+3]):
-            with cc[j]:
-                st.markdown(f'<div class="bigcard"><div style="font-size:1.7rem">{ic}</div><b>{p}</b><div class="smallmuted">{desc}</div></div>',unsafe_allow_html=True)
-                if st.button(f'Open {p}',use_container_width=True,key='home_'+p): goto(p); st.rerun()
+    c=st.columns(4)
+    c[0].metric('Water today',f'{water:.0f} oz',f'Goal {water_goal:.0f} oz')
+    c[1].metric('Saved toward goals',money(savings))
+    c[2].metric('Workouts / 7 days',workouts)
+    c[3].metric('Calories logged',f'{calories:.0f}')
 
+    st.subheader('My dashboard')
+    insights=_dashboard_insights()
+    grid=[
+        ('💰','Finances'),('🥗','Food & Nutrition'),('🛒','Grocery Shopping'),
+        ('🏋🏾‍♀️','My Trainer'),('💧','Water & Jug Puzzles'),('📖','Vocabulary'),
+        ('🌱','Growth Lab'),('💬','Conversation & Current Events'),('🏗️','Career Simulator'),
+        ('❤️','Health & Life')
+    ]
+
+    st.markdown("""
+    <style>
+    .st-key-dashcard button{
+        min-height:188px!important;
+        border-radius:20px!important;
+        padding:1rem!important;
+        text-align:left!important;
+        justify-content:flex-start!important;
+        white-space:pre-wrap!important;
+        line-height:1.45!important;
+        border:1px solid rgba(120,120,120,.28)!important;
+    }
+    .st-key-progresshome button{
+        min-height:72px!important;
+        border-radius:18px!important;
+        font-size:1.05rem!important;
+        font-weight:750!important;
+    }
+    @media(max-width:640px){
+      .st-key-dashcard button{min-height:170px!important;padding:.8rem!important;}
+    }
+    </style>
+    """,unsafe_allow_html=True)
+
+    for rowstart in range(0,len(grid),2):
+        cc=st.columns(2)
+        for j,(ic,p) in enumerate(grid[rowstart:rowstart+2]):
+            lines=insights[p]
+            label=f"{ic}  {p}\n\n{lines[0]}\n{lines[1]}\n{lines[2]}\n\nOpen →"
+            with cc[j]:
+                with st.container(key="dashcard"):
+                    if st.button(label,use_container_width=True,key="home_"+p):
+                        goto(p); st.rerun()
+
+    st.markdown("### Detailed progress")
+    with st.container(key="progresshome"):
+        if st.button("📈 Open My Progress — detailed trends for every area →",use_container_width=True,key="home_progress_detail"):
+            goto("My Progress"); st.rerun()
 
 # ---------- Finances ----------
 def roommate_summary():
