@@ -11,7 +11,7 @@ DB_PATH = APP_DIR / 'chaplife.db'
 
 st.set_page_config(page_title='ChapLife', page_icon='✨', layout='wide', initial_sidebar_state='collapsed')
 
-BUILD_VERSION='ChapLife Cloud v5.3.2'
+BUILD_VERSION='ChapLife Cloud v5.3.3'
 
 st.markdown('''
 <style>
@@ -599,10 +599,10 @@ def _dashboard_insights():
 
     # Grocery
     groceries=rows("SELECT * FROM grocery_items")
-    checked=[r for r in groceries if r["checked"]]
+    checked=[r for r in groceries if r["purchased"]]
     grocery=[
         f"✅ {len(groceries)} grocery item{'s' if len(groceries)!=1 else ''} currently tracked" if groceries else "✅ Grocery list is ready",
-        f"✅ {len(checked)} item{'s' if len(checked)!=1 else ''} checked off" if checked else "✅ Meal ingredients can populate automatically",
+        f"✅ {len(checked)} item{'s' if len(checked)!=1 else ''} purchased / checked off" if checked else "✅ Meal ingredients can populate automatically",
         "🔧 Check store/quantity before shopping" if groceries else "🔧 Generate a list from your meal plan"
     ]
 
