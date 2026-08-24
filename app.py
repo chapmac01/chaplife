@@ -8,6 +8,14 @@ from pathlib import Path
 import os
 import base64
 import io, csv, zipfile
+try:
+    from pypdf import PdfReader
+except Exception:
+    PdfReader=None
+try:
+    from docx import Document as DocxDocument
+except Exception:
+    DocxDocument=None
 import json, re, textwrap, urllib.parse, hashlib, hmac
 import pandas as pd
 import requests
@@ -3529,7 +3537,7 @@ def remittance_sheet_values(form_row):
 
 def create_completed_remittance_sheet(form_row):
     if st.session_state.get('demo_admin_mode'):
-        raise RuntimeError('DEMO ADMIN MODE: Google/Drive actions are disabled in the sandbox.')
+        raise RuntimeError('ADMIN DEMO MODE: Google/Drive actions are disabled in the sandbox.')
     if test_preview_active():
         raise RuntimeError('TEST MODE: external Google/Drive actions are disabled.')
     if not google_connected():
@@ -7007,7 +7015,7 @@ def leadership_update_recipient_label(r):
 
 
 # ============================================================
-# v3.6.24 — External Demo Admin Sandbox
+# v3.6.24 — External Admin Demo Sandbox
 # ============================================================
 
 def demo_admin_enabled():
@@ -7037,19 +7045,320 @@ def demo_admin_fake_member():
         'role':'Admin',
         'active':True,
         'is_philo':False,
-        'membership_type':'Demo',
-        'account_type':'Demo Admin'
+        'membership_type':'Demo Soror',
+        'account_type':'Admin Demo'
     }
 
 def demo_admin_notice():
     st.error(
-        '🧪 DEMO ADMIN MODE — This is a protected sandbox. '
+        '🧪 ADMIN DEMO MODE — This is a protected sandbox. '
         'Nothing you submit, approve, delete, upload, vote on, edit, or change is saved to the live Philo Hub.'
     )
     st.caption(
         'Demo Admin can explore all dashboards and workflows, but live member records, documents, '
         'Google Drive files, settings, votes, payments, reports, and Philo data cannot be changed.'
     )
+
+OFFICER_DOCUMENT_TYPES=[
+    "Treasurer Report","Financial Secretary Report","President Report",
+    "Vice President Report","Recording Secretary Report","Historian Report",
+    "Committee Report","Meeting Minutes","Annual / End-of-Year Report",
+    "Budget / Financial Report","Event Report","Other Officer Record"
+]
+
+def officer_doc_validate(uploaded,max_mb=25):
+    if uploaded is None:
+        raise ValueError("Choose a document to upload.")
+    raw=bytes(uploaded.getbuffer())
+    if not raw:
+        raise ValueError("The selected document is empty.")
+    if len(raw)>max_mb*1024*1024:
+        raise ValueError(f"File is too large. Maximum size is {max_mb} MB.")
+    name=Path(uploaded.name or "document").name
+    ext=Path(name).suffix.lower()
+    if ext not in {".pdf",".docx",".xlsx",".xls",".csv",".txt"}:
+        raise ValueError("Supported files: PDF, DOCX, XLSX/XLS, CSV, TXT.")
+    return raw,name,ext
+
+def officer_doc_extract(uploaded):
+    raw,name,ext=officer_doc_validate(uploaded)
+    parts=[]; warnings=[]
+    if ext==".pdf":
+        if PdfReader is None:
+            warnings.append("PDF parser unavailable in this deployment.")
+        else:
+            reader=PdfReader(BytesIO(raw))
+            for i,p in enumerate(reader.pages[:100]):
+                try:
+                    parts.append(p.extract_text() or "")
+                except Exception:
+                    warnings.append(f"Could not read PDF page {i+1}.")
+    elif ext==".docx":
+        if DocxDocument is None:
+            warnings.append("DOCX parser unavailable in this deployment.")
+        else:
+            d=DocxDocument(BytesIO(raw))
+            parts.extend([p.text for p in d.paragraphs if p.text.strip()])
+            for t in d.tables:
+                for row in t.rows:
+                    parts.append(" | ".join(c.text.strip() for c in row.cells))
+    elif ext in {".xlsx",".xls"}:
+        xl=pd.ExcelFile(BytesIO(raw))
+        for sheet in xl.sheet_names[:25]:
+            df=pd.read_excel(BytesIO(raw),sheet_name=sheet,header=None).dropna(how="all")
+            if df.empty: continue
+            parts.append(f"[Sheet: {sheet}]")
+            for _,r in df.head(1000).iterrows():
+                vals=[str(x).strip() for x in r.tolist() if str(x).strip() not in {"","nan","None"}]
+                if vals: parts.append(" | ".join(vals))
+    elif ext==".csv":
+        df=pd.read_csv(BytesIO(raw))
+        for _,r in df.head(2000).iterrows():
+            vals=[str(x).strip() for x in r.tolist() if str(x).strip() not in {"","nan","None"}]
+            if vals: parts.append(" | ".join(vals))
+    else:
+        parts.append(raw.decode("utf-8",errors="replace"))
+    return {
+        "raw":raw,"name":name,"ext":ext,"text":"\n".join(parts),
+        "sha256":hashlib.sha256(raw).hexdigest(),
+        "mime":str(getattr(uploaded,"type","") or "application/octet-stream"),
+        "warnings":warnings
+    }
+
+def _extract_year(text):
+    m=re.search(r"\b(20\d{2})\s*[-–—/]\s*(20\d{2})\b",text)
+    return f"{m.group(1)}-{m.group(2)}" if m else ""
+
+def _extract_date(text):
+    pats=[
+        r"\b(20\d{2}-\d{1,2}-\d{1,2})\b",
+        r"\b(\d{1,2}/\d{1,2}/20\d{2})\b",
+        r"\b((?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{1,2},?\s+20\d{2})\b",
+    ]
+    for pat in pats:
+        m=re.search(pat,text,re.I)
+        if m:
+            try: return pd.to_datetime(m.group(1)).date().isoformat()
+            except Exception: pass
+    return None
+
+def _extract_money(label,text):
+    for pat in [rf"{label}\s*[:\-]?\s*\$?\s*([0-9][0-9,]*\.?[0-9]{{0,2}})",
+                rf"{label}.*?\$?\s*([0-9][0-9,]*\.?[0-9]{{0,2}})"]:
+        m=re.search(pat,text,re.I|re.S)
+        if m:
+            try: return float(m.group(1).replace(",",""))
+            except Exception: pass
+    return None
+
+def officer_doc_detect_office(doc_type,text,position_hint=""):
+    combined=f"{doc_type} {position_hint} {text[:5000]}".casefold()
+    for office,token in [
+        ("Financial Secretary","financial secretary"),("Treasurer","treasurer"),
+        ("Historian","historian"),("Recording Secretary","recording secretary"),
+        ("Vice President","vice president"),("President","president"),
+        ("Chaplain","chaplain"),("Parliamentarian","parliamentarian"),
+        ("Sergeant-at-Arms","sergeant")
+    ]:
+        if token in combined: return office
+    return position_hint or ""
+
+def officer_doc_route(office,doc_type):
+    if office in {"Treasurer","Financial Secretary"} or "Financial" in doc_type or "Budget" in doc_type:
+        return "Finance"
+    if office=="Historian" or doc_type in {"Historian Report","Event Report"}:
+        return "Historian"
+    if office=="Recording Secretary" or doc_type=="Meeting Minutes":
+        return "Minutes / Secretary"
+    return "Officer Report"
+
+def officer_doc_common(parsed,doc_type,position_hint=""):
+    txt=parsed["text"]
+    office=officer_doc_detect_office(doc_type,txt,position_hint)
+    lines=[x.strip() for x in txt.splitlines() if x.strip()]
+    title=next((x for x in lines[:40] if len(x)<=180 and any(k in x.casefold() for k in ["report","minutes","budget","historian","treasurer","financial secretary"])), "")
+    return {
+        "office":office,"document_type":doc_type,
+        "title":title or f"{doc_type} — {parsed['name']}",
+        "sorority_year":_extract_year(txt),"report_date":_extract_date(txt),
+        "summary":txt[:5000].strip()
+    }
+
+def officer_doc_finance(parsed):
+    txt=parsed["text"]
+    return {
+        "opening_balance":_extract_money(r"(?:opening balance|beginning balance|starting balance)",txt),
+        "deposits":_extract_money(r"(?:total deposits|deposits|total income|income)",txt),
+        "withdrawals":_extract_money(r"(?:total withdrawals|withdrawals|total expenses|expenses)",txt),
+        "closing_balance":_extract_money(r"(?:closing balance|ending balance|bank balance|account balance)",txt),
+        "dues":_extract_money(r"(?:dues)",txt),
+        "donations":_extract_money(r"(?:donations?)",txt),
+        "fundraising":_extract_money(r"(?:fundraising|fundraiser)",txt),
+        "zeffy":_extract_money(r"(?:zeffy)",txt),
+        "assessments":_extract_money(r"(?:assessments?)",txt),
+        "reimbursements":_extract_money(r"(?:reimbursements?|club expenses?)",txt),
+        "gifts":_extract_money(r"(?:gifts?)",txt),
+    }
+
+def officer_doc_historian(parsed):
+    lines=[x.strip() for x in parsed["text"].splitlines() if x.strip()]
+    markers=["walk","meeting","induction","award","luncheon","service","event","boule",
+             "photoshoot","parade","spotlight","reception","training","tech day"]
+    found=[]
+    for line in lines:
+        if len(line)<=300 and any(k in line.casefold() for k in markers):
+            found.append({"event_date":_extract_date(line),"title":line[:180],"description":line[:500]})
+        if len(found)>=40: break
+    return found
+
+def save_officer_intake(parsed,common,mid):
+    dup=table("officer_document_intake").select("id,status").eq("file_sha256",parsed["sha256"]).execute().data or []
+    if dup: return dup[0]["id"],True
+    safe=re.sub(r"[^A-Za-z0-9._-]+","_",parsed["name"])
+    path=f"officer-document-intake/{common.get('sorority_year') or 'unknown-year'}/{parsed['sha256'][:12]}_{safe}"
+    stored=upload_private(parsed["raw"],path,parsed["mime"])
+    if not stored: raise RuntimeError("Source document could not be stored.")
+    row=table("officer_document_intake").insert({
+        "file_name":parsed["name"],"file_path":stored,"file_sha256":parsed["sha256"],
+        "document_type":common["document_type"],"detected_office":common["office"],
+        "sorority_year":common.get("sorority_year") or "","report_date":common.get("report_date"),
+        "detected_title":common.get("title") or "","extracted_text_preview":common.get("summary") or "",
+        "route_destination":officer_doc_route(common["office"],common["document_type"]),
+        "status":"Extracted — Review Required","uploaded_by_member_id":mid,
+        "uploaded_by_name":member_name,"created_at":datetime.now(timezone.utc).isoformat(),
+        "updated_at":datetime.now(timezone.utc).isoformat()
+    }).execute().data or []
+    if not row: raise RuntimeError("Document intake record was not created.")
+    return row[0]["id"],False
+
+def render_universal_document_intake(mid,position,is_admin_flag=False):
+    st.markdown("## Upload Officer Document")
+    st.caption(
+        "Upload the report once. The app extracts what it can and prepares reviewable drafts. "
+        "Existing forms remain available only as backup/manual correction."
+    )
+    with st.expander("📄 Upload & Extract Officer Document",expanded=False):
+        doc_type=st.selectbox("Document Type",OFFICER_DOCUMENT_TYPES,key=f"u_doc_type_{position}_{mid}")
+        upload=st.file_uploader("Officer Document",type=["pdf","docx","xlsx","xls","csv","txt"],key=f"u_doc_{position}_{mid}")
+        if st.button("Extract Information from Document",use_container_width=True,key=f"u_extract_{position}_{mid}"):
+            try:
+                parsed=officer_doc_extract(upload)
+                common=officer_doc_common(parsed,doc_type,position)
+                result={"parsed":parsed,"common":common,"finance":officer_doc_finance(parsed),"events":officer_doc_historian(parsed)}
+                st.session_state[f"u_result_{position}_{mid}"]=result
+            except Exception as ex:
+                st.error(f"Document could not be extracted: {ex}")
+
+        result=st.session_state.get(f"u_result_{position}_{mid}")
+        if result:
+            parsed=result["parsed"]; common=result["common"]
+            for w in parsed.get("warnings") or []: st.warning(w)
+            st.markdown("### Extracted Information — Review Before Saving")
+            title=st.text_input("Title",value=common["title"],key=f"u_title_{position}_{mid}")
+            sy=st.text_input("Sorority Year",value=common["sorority_year"],placeholder="2025-2026",key=f"u_sy_{position}_{mid}")
+            rdate=st.text_input("Report Date",value=common["report_date"] or "",placeholder="YYYY-MM-DD",key=f"u_date_{position}_{mid}")
+            office=st.text_input("Officer / Office",value=common["office"] or position,key=f"u_office_{position}_{mid}")
+            summary=st.text_area("Extracted Summary / Notes",value=common["summary"],height=220,key=f"u_summary_{position}_{mid}")
+            route=officer_doc_route(office,doc_type)
+            st.info(f"**Suggested destination:** {route}")
+
+            finance_edit=None
+            if route=="Finance":
+                st.markdown("#### Financial Values Found")
+                finance_edit={}
+                for key,label in [
+                    ("opening_balance","Opening Balance"),("deposits","Deposits / Income"),
+                    ("withdrawals","Withdrawals / Expenses"),("closing_balance","Closing / Ending Balance"),
+                    ("dues","Dues"),("donations","Donations"),("fundraising","Fundraising"),
+                    ("zeffy","Zeffy / Online Giving"),("assessments","Assessments"),
+                    ("reimbursements","Reimbursements / Club Expenses"),("gifts","Gifts")
+                ]:
+                    finance_edit[key]=st.number_input(label,value=float(result["finance"].get(key) or 0),
+                        step=0.01,format="%.2f",key=f"u_fin_{position}_{mid}_{key}")
+            elif route=="Historian":
+                st.markdown("#### Possible Historical Events Found")
+                if result["events"]:
+                    st.dataframe(pd.DataFrame(result["events"]),hide_index=True,use_container_width=True)
+                    st.caption("These remain drafts until the Historian reviews them.")
+                else:
+                    st.info("No event candidates were confidently identified.")
+
+            c1,c2=st.columns(2)
+            if c1.button("Save Extracted Drafts",use_container_width=True,key=f"u_save_{position}_{mid}"):
+                try:
+                    common2=dict(common)
+                    common2.update({"title":title.strip(),"sorority_year":sy.strip(),"report_date":rdate.strip() or None,
+                                    "office":office.strip(),"summary":summary.strip()})
+                    intake_id,duplicate=save_officer_intake(parsed,common2,mid)
+                    if duplicate: st.warning("This exact document was already uploaded; the existing intake record was reused.")
+                    if route=="Finance":
+                        f=finance_edit or result["finance"]
+                        table("officer_finance_extraction_drafts").upsert({
+                            "intake_id":intake_id,"sorority_year":sy.strip(),"report_date":rdate.strip() or None,
+                            **f,"status":"Draft from Uploaded Document",
+                            "created_by_member_id":mid,"created_by_name":member_name,
+                            "created_at":datetime.now(timezone.utc).isoformat()
+                        },on_conflict="intake_id").execute()
+                        msg="Financial extraction draft saved for review."
+                    elif route=="Historian":
+                        created=0
+                        for ev in result["events"]:
+                            title_ev=str(ev.get("title") or "").strip()
+                            if not title_ev: continue
+                            table("officer_historian_extraction_drafts").insert({
+                                "intake_id":intake_id,"sorority_year":sy.strip(),"event_date":ev.get("event_date"),
+                                "title":title_ev,"description":ev.get("description") or "",
+                                "verification_status":"Previously Documented — Needs Source",
+                                "status":"Draft from Uploaded Document","created_by_member_id":mid,
+                                "created_by_name":member_name,"created_at":datetime.now(timezone.utc).isoformat()
+                            }).execute()
+                            created+=1
+                        msg=f"Historian extraction saved with {created} candidate event draft(s)."
+                    else:
+                        table("officer_report_extraction_drafts").upsert({
+                            "intake_id":intake_id,"office":office.strip(),"document_type":doc_type,
+                            "sorority_year":sy.strip(),"report_date":rdate.strip() or None,
+                            "title":title.strip(),"summary":summary.strip(),"status":"Draft from Uploaded Document",
+                            "created_by_member_id":mid,"created_by_name":member_name,
+                            "created_at":datetime.now(timezone.utc).isoformat()
+                        },on_conflict="intake_id").execute()
+                        st.session_state["officer_doc_report_prefill"]={
+                            "office":office.strip(),
+                            "document_type":doc_type,
+                            "sorority_year":sy.strip(),
+                            "report_date":rdate.strip() or "",
+                            "title":title.strip(),
+                            "summary":summary.strip(),
+                            "intake_id":intake_id
+                        }
+                        msg="Officer report extraction draft saved and is ready for the Report Center."
+                    table("officer_document_intake").update({"status":"Drafts Created","updated_at":datetime.now(timezone.utc).isoformat()}).eq("id",intake_id).execute()
+                    st.success(msg); st.rerun()
+                except Exception as ex:
+                    st.error(f"Extracted drafts were not saved: {ex}")
+            if c2.button("Cancel Extraction",use_container_width=True,key=f"u_cancel_{position}_{mid}"):
+                st.session_state.pop(f"u_result_{position}_{mid}",None); st.rerun()
+
+    report_prefill=st.session_state.get("officer_doc_report_prefill")
+    if report_prefill and officer_doc_route(report_prefill.get("office",""),report_prefill.get("document_type",""))=="Officer Report":
+        st.success("Your reviewed extraction is ready. You do not need to type the report again.")
+        if st.button("📝 Open Reviewed Draft in Report Center",use_container_width=True,key=f"u_open_report_{position}_{mid}"):
+            st.session_state["managed_report_draft"]=report_prefill.get("summary") or ""
+            st.session_state["managed_report_title"]=report_prefill.get("title") or f"{report_prefill.get('office') or position} Report"
+            st.session_state["managed_report_period"]=(report_prefill.get("report_date") or report_prefill.get("sorority_year") or "")
+            st.session_state["report_prefill_source"]=f"Officer: {report_prefill.get('office') or position}"
+            st.session_state["report_prefill_updates"]=report_prefill.get("summary") or ""
+            set_page("📝 Reports")
+
+    try:
+        recent=table("officer_document_intake").select(
+            "file_name,document_type,detected_office,sorority_year,report_date,route_destination,status,created_at"
+        ).order("created_at",desc=True).limit(20).execute().data or []
+        if recent:
+            st.markdown("### Recent Officer Document Uploads")
+            st.dataframe(pd.DataFrame(recent),hide_index=True,use_container_width=True)
+    except Exception:
+        pass
 
 def auth_cfg():
     a=sec('auth')
@@ -7095,7 +7404,7 @@ def require_login():
     st.caption('Interested women can create a separate Interest Profile. This does not provide access to the member Hub.')
 
     if demo_admin_enabled():
-        with st.expander('🧪 Demo Admin — Explore the Full Hub',expanded=False):
+        with st.expander('🧪 Admin Demo — Explore the Full Hub',expanded=False):
             st.caption(
                 'For invited Sorors who want to explore the app. Demo Admin can try every dashboard and workflow, '
                 'but nothing in the live Hub can be changed.'
@@ -7103,7 +7412,7 @@ def require_login():
             with st.form('demo_admin_login_form'):
                 demo_name=st.text_input('Demo Login Name',value='')
                 demo_code=st.text_input('Demo Access Code',type='password')
-                enter_demo=st.form_submit_button('Enter Demo Admin Sandbox',use_container_width=True)
+                enter_demo=st.form_submit_button('Enter Admin Demo Sandbox',use_container_width=True)
             if enter_demo:
                 if demo_admin_login_allowed(demo_name,demo_code):
                     st.session_state['demo_admin_mode']=True
@@ -7258,7 +7567,7 @@ def verify_google_oauth_state(state):
 
 def google_connect_url():
     if st.session_state.get('demo_admin_mode'):
-        raise RuntimeError('DEMO ADMIN MODE: Google/Drive actions are disabled in the sandbox.')
+        raise RuntimeError('ADMIN DEMO MODE: Google/Drive actions are disabled in the sandbox.')
     if test_preview_active():
         raise RuntimeError('TEST MODE: external Google/Drive actions are disabled.')
     if not bool(st.session_state.get('logged_in')) or not bool(st.session_state.get('is_admin')):
@@ -7650,7 +7959,7 @@ def save_volunteer_link_for_event(event_id,url):
 
 def drive_upload_bytes(data,filename,mime_type,folder_id):
     if st.session_state.get('demo_admin_mode'):
-        raise RuntimeError('DEMO ADMIN MODE: Google/Drive actions are disabled in the sandbox.')
+        raise RuntimeError('ADMIN DEMO MODE: Google/Drive actions are disabled in the sandbox.')
     service=drive_service()
     if not service:
         raise RuntimeError('Connect Google first.')
@@ -7758,9 +8067,34 @@ if st.session_state.get('test_preview_kind')=='member':
     if st.session_state.get('test_preview_last_action'):
         st.info(st.session_state.pop('test_preview_last_action'))
 
+if st.session_state.get('demo_admin_mode') and not st.session_state.get('admin_demo_welcome_acknowledged'):
+    st.markdown('## Welcome to the NBS Philo Hub — Admin Demo')
+    with st.container(border=True):
+        st.markdown('### 🧪 This is a protected demonstration space')
+        st.write(
+            'This Admin Demo is designed so invited Sorors can experience the Philo Hub from an administrator’s point of view. '
+            'You are encouraged to explore every corner of the app, open every dashboard, try the forms and workflows, '
+            'review officer tools, test reports, votes, intake, Historian features, Treasurer features, and other available areas.'
+        )
+        st.success(
+            'Anything you do while using Admin Demo will NOT affect the Philos’ live information or documents in any way.'
+        )
+        st.write(
+            'Your demo actions are not saved to live member records, Philo documents, Google Drive files, votes, tasks, '
+            'forms, messages, settings, approvals, uploads, financial information, or other live Hub data.'
+        )
+        st.info(
+            'Feel free to click, type, test, approve, reject, vote, upload, edit, and explore. '
+            'The purpose of this account is to let you see how the full Hub works without changing the real app.'
+        )
+        if st.button('I Understand — Enter the Admin Demo',use_container_width=True,key='admin_demo_welcome_continue'):
+            st.session_state['admin_demo_welcome_acknowledged']=True
+            st.rerun()
+    st.stop()
+
 if st.session_state.get('demo_admin_mode'):
     c_demo1,c_demo2=st.columns([6,1])
-    c_demo1.warning('🧪 Demo Admin Sandbox is active.')
+    c_demo1.warning('🧪 Admin Demo Sandbox is active.')
     if c_demo2.button('Exit Demo',use_container_width=True,key='exit_demo_admin_top'):
         st.session_state.clear()
         st.rerun()
@@ -8335,7 +8669,9 @@ elif page=='📝 Reports':
     tabs=st.tabs(['Create Full Report','End-of-Year','Published Report Manager'])
 
     with tabs[0]:
-        source=st.selectbox('Report For',report_sources)
+        prefill_source=st.session_state.get('report_prefill_source','')
+        source_index=report_sources.index(prefill_source) if prefill_source in report_sources else 0
+        source=st.selectbox('Report For',report_sources,index=source_index)
 
         author_ids=report_author_options(member_id,is_admin)
         author_map={aid:report_author_info(aid) for aid in author_ids}
@@ -8349,6 +8685,9 @@ elif page=='📝 Reports':
         )
         report_author=author_map[report_author_id]
         chapter_meeting_date=st.date_input('Chapter Meeting Date',value=date.today(),key='official_chapter_meeting_date')
+        if st.session_state.get('report_prefill_updates'):
+            st.success('Reviewed officer-document extraction loaded. Edit anything you want; you do not need to retype the uploaded report.')
+
         month=st.selectbox(
             'Reporting Month',
             [f"{datetime.now().year}-{m:02d}" for m in range(1,13)],
@@ -8356,7 +8695,7 @@ elif page=='📝 Reports':
         )
 
         accomplishments=st.text_area('Accomplishments',height=100)
-        challenges=st.text_area('Updates / concerns / unfinished business',height=100)
+        challenges=st.text_area('Updates / concerns / unfinished business',value=st.session_state.get('report_prefill_updates',''),height=100)
         upcoming=st.text_area('Upcoming Events / plans',height=90)
         recommendations=st.text_area('Reminders / recommendations',height=90)
 
@@ -10319,6 +10658,7 @@ elif page=='🏅 Officer Dashboard':
 
         officer_tabs=st.tabs([
             '🏛️ Role Center',
+            '📄 Document Intake',
             '🆘 Advisor Help',
             '📝 Reports & Meetings',
             '🗂️ Records',
@@ -11079,6 +11419,14 @@ elif page=='🏅 Officer Dashboard':
                         st.caption('Use the Reports page to turn your answers into the standard NBS report.')
 
         with officer_tabs[1]:
+            st.subheader('📄 Universal Officer Document Intake')
+            st.caption(
+                'Upload the officer document once. The Hub extracts what it can, you review/correct it, '
+                'and only then are draft records created. The existing manual forms remain available as backup.'
+            )
+            render_universal_document_intake(member_id,pos,is_admin)
+
+        with officer_tabs[2]:
             st.subheader('Advisor Updates & Help')
             st.caption('Updates sent to you by the Advisor appear here. You decide whether to add them to your report, create a vote/action, or handle them separately.')
 
@@ -11176,7 +11524,7 @@ elif page=='🏅 Officer Dashboard':
                     st.success('Your request was sent to the Advisor.')
                     st.rerun()
 
-        with officer_tabs[2]:
+        with officer_tabs[3]:
             st.subheader('Reports & Meetings')
             c1,c2=st.columns(2)
             if c1.button('📝 Open Report Center',key=f"officer_report_center_623_{pos}",use_container_width=True):
@@ -11205,18 +11553,18 @@ elif page=='🏅 Officer Dashboard':
                     abstain=sum(1 for x in results if x.get('vote')=='Abstain')
                     st.write(f"**{v.get('title')}** — Yes {yes} • No {no} • Abstain {abstain} • closes {fmt_dt(v.get('closes_at'))}")
 
-        with officer_tabs[3]:
+        with officer_tabs[4]:
             st.subheader('Officer Records')
             render_previous_sorority_year_records(pos,member_id,is_admin)
 
-        with officer_tabs[4]:
+        with officer_tabs[5]:
             st.subheader('Flyer Workflow')
             if is_admin or pos in OFFICER_POSITIONS:
                 render_philo_flyer_approval_workflow(member_id,is_admin)
             else:
                 st.info('Flyer workflow is not assigned to this office.')
 
-        with officer_tabs[5]:
+        with officer_tabs[6]:
             st.subheader('Historian / Continuity')
             if pos=='Historian' or is_admin:
                 render_historian_continuity_center(member_id,is_admin)
