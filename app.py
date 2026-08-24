@@ -11,7 +11,7 @@ DB_PATH = APP_DIR / 'chaplife.db'
 
 st.set_page_config(page_title='ChapLife', page_icon='✨', layout='wide', initial_sidebar_state='collapsed')
 
-BUILD_VERSION='ChapLife Cloud v5.3.3'
+BUILD_VERSION='ChapLife Cloud v5.5'
 
 st.markdown('''
 <style>
@@ -2900,6 +2900,145 @@ def reset_career_simulation():
             try: del st.session_state[k]
             except: pass
 
+
+def career_message_training(m):
+    """Context-sensitive inbox coaching for the selected message."""
+    sender=m["sender"]; subject=m["subject"]; body=m["body"]
+    txt=(subject+" "+body).lower()
+
+    if "inspection" in txt:
+        return {
+            "ask":"The sender needs the framing inspection date/time confirmed before field work depends on it.",
+            "why":"Drywall is scheduled next. If the inspection is not confirmed, the Superintendent cannot safely release the next activity.",
+            "process":"Email the Inspection Agency for confirmation. Keep Dana copied because she owns field sequencing.",
+            "include":["Project / inspection being confirmed","Requested inspection date/time","Why the answer matters: drywall is scheduled","The response deadline","A clear request for confirmation"],
+            "next":"After sending, keep the task **Waiting** until the Inspection Agency actually confirms. When confirmation arrives, communicate it to Dana and then mark the task Done.",
+            "status":"Open → In Progress while you are preparing/sending the request → Waiting after the request is sent → Done only after confirmation is received and communicated."
+        }
+    if "rfi" in txt or ("outlet" in txt and "height" in txt):
+        return {
+            "ask":"The field found conflicting contract information and needs formal design direction.",
+            "why":"A coordinator should not guess which drawing governs. The conflict needs a traceable design response.",
+            "process":"Review the current documents first. If the conflict is confirmed, create a formal RFI in the RFI Desk rather than trying to solve it only by email.",
+            "include":["Affected rooms/location","Exact current drawing/detail references","The conflicting requirements","One clear clarification question","Potential field/schedule impact"],
+            "next":"Route the RFI, then set the related work to Waiting while design responds. Distribute the formal response before closing the task.",
+            "status":"Open → In Progress while checking documents/drafting → Waiting after the RFI is routed → Done after the design answer is distributed and the record is updated."
+        }
+    if any(x in txt for x in ["pay application","pay app","billing","payment"]):
+        return {
+            "ask":"Accounting/project management needs the pay application reviewed before the payment-cycle cutoff.",
+            "why":"Payment should be supported by verified work/material and the required backup.",
+            "process":"Use the Cost Desk. Compare requested billing with field progress and documentation before recommending approval, hold, or correction.",
+            "include":["What amount/percentage is being reviewed","What the field/supporting backup shows","Any discrepancy","Your recommended action","Any deadline or missing backup"],
+            "next":"If backup/correction is outstanding, leave the task Waiting. Close it only when the supported amount/action has been documented.",
+            "status":"Open → In Progress during review → Waiting if another party owes backup/correction → Done once the supported review is documented and routed."
+        }
+    if "hardware" in txt or "submittal" in txt:
+        return {
+            "ask":"A vendor or project team member is warning about a submittal/lead-time issue.",
+            "why":"Late approval can affect procurement and turnover.",
+            "process":"Confirm the current submittal status, identify who owes the next action, then follow up with that party and notify the PM if schedule risk exists.",
+            "include":["Package/item name","Current status","What is needed next","Required-by date / lead-time risk","Clear owner for the next action"],
+            "next":"Keep it Waiting when the vendor/design team owes a response. Mark Done only after the required action is received, distributed, and logged.",
+            "status":"Open → In Progress while checking/routing → Waiting while another party owes action → Done after the required approval/release/status is documented."
+        }
+    if "oac" in txt or "meeting" in txt:
+        return {
+            "ask":"The PM needs an accurate meeting packet/status before the owner meeting.",
+            "why":"The team will make decisions from these logs, so stale or guessed information can create bad decisions.",
+            "process":"Reconcile the requested logs/statuses against the simulator records, flag anything uncertain, and send the verified packet/update.",
+            "include":["Current RFI status","Current submittal/procurement risks","Open high-priority items","Anything not yet verified","Meeting deadline"],
+            "next":"If you still need information from someone else, set Waiting. Done means the verified packet/update was actually sent.",
+            "status":"Open → In Progress while reconciling → Waiting only if required information is outstanding → Done after the verified packet is sent."
+        }
+    return {
+        "ask":"Read the message for the specific request, owner, deadline, and project impact.",
+        "why":"A coordinator turns incoming information into a clear next action and makes sure the loop is closed.",
+        "process":"Identify whether this needs an email, formal project document, field verification, cost review, or another workflow before responding.",
+        "include":["What you understood","What action you are taking","Who owns the next step","When an answer/action is needed"],
+        "next":"Do not close the related task until the requested outcome—not just your first email—has actually happened.",
+        "status":"Open before work starts → In Progress while you are actively working → Waiting when another person owes the next action → Done only when the outcome is complete and documented."
+    }
+
+def career_task_training(t):
+    """Step-by-step task coaching tied to the selected task."""
+    key=t["task_key"]; title=t["title"]; detail=t["detail"]
+    if key=="T1" or "inspection" in title.lower():
+        steps=[
+            "Read the related Inbox request and confirm the required response deadline.",
+            "Open Team and identify the Inspection Agency as the party controlling inspection confirmation.",
+            "Compose an email to Inspection Agency; CC Dana Lewis · Superintendent.",
+            "Ask for the confirmed inspection date/time, explain drywall is scheduled, and include the deadline.",
+            "After sending, change this task to **Waiting** because another party now owes the confirmation.",
+            "When the Inspection Agency confirms, send/communicate that confirmation to Dana.",
+            "Only then change the task to **Done**."
+        ]
+        status="**Open:** not started. **In Progress:** you are researching/composing/contacting. **Waiting:** your request is out and the Inspection Agency owes confirmation. **Done:** confirmation was received and communicated to Dana."
+    elif key=="T2" or "rfi" in title.lower():
+        steps=[
+            "Read the Apex message identifying the drawing conflict and affected rooms.",
+            "Open RFI Desk → Document Control and verify the current revisions of A-402 and E-201.",
+            "Read the actual conflicting requirements in those current documents.",
+            "Draft a formal RFI with a short subject, exact references, factual conflict, location, and one clear question.",
+            "Route the RFI. Do not decide the design answer yourself.",
+            "After routing, change the task to **Waiting** while the architect owes the formal response.",
+            "When the response arrives, distribute it to the affected field team and update the RFI record.",
+            "Then mark the task **Done**."
+        ]
+        status="**Open:** not started. **In Progress:** checking documents/drafting. **Waiting:** RFI has been formally routed and design owes a response. **Done:** formal response was received, distributed, and recorded."
+    elif key=="T3" or "oac" in title.lower():
+        steps=[
+            "Review the request and meeting deadline.",
+            "Check the RFI log, submittal/procurement information, open urgent work, and look-ahead information available in the simulator.",
+            "Reconcile statuses; do not guess missing dates/statuses.",
+            "Flag anything that is not verified.",
+            "Prepare/send the requested meeting packet or status update to Marcus.",
+            "Mark Done only after the verified packet/update was actually sent."
+        ]
+        status="**Open:** untouched. **In Progress:** reconciling/preparing. **Waiting:** only if you need information from someone else. **Done:** verified packet/update sent."
+    elif key=="T4" or "pay app" in title.lower():
+        steps=[
+            "Open Cost Desk and read the contract, prior paid, requested payment, and field-progress figures.",
+            "Compare requested billing with the available support/field progress.",
+            "Choose the appropriate review action; do not approve unsupported billing.",
+            "Document the discrepancy and what backup/correction is needed.",
+            "Submit the review.",
+            "If Accounting/Apex owes backup or correction, set Waiting.",
+            "Mark Done when the supported resolution/recommendation is documented."
+        ]
+        status="**Open:** not reviewed. **In Progress:** actively comparing/documenting. **Waiting:** backup/correction is owed by another party. **Done:** supported review/resolution documented."
+    elif key=="T5" or "hardware" in title.lower():
+        steps=[
+            "Read the vendor message and identify the lead-time risk.",
+            "Determine the current submittal/release status from available records.",
+            "Identify who owes the next action.",
+            "Follow up with the responsible party and include the required-by timing.",
+            "Notify Marcus if the delay can affect turnover/schedule.",
+            "Use Waiting while another party owes approval/release; Done only after the required action/status is documented."
+        ]
+        status="**Open:** not started. **In Progress:** checking/following up. **Waiting:** another party owes approval/release. **Done:** required action received and documented."
+    elif key=="T6" or "coi" in title.lower():
+        steps=[
+            "Read the compliance request and identify whose COI is expiring.",
+            "Contact the subcontractor/vendor that must provide the updated certificate.",
+            "Copy the appropriate project administration/accounting contact if they maintain compliance records.",
+            "Set Waiting after the request is sent.",
+            "When the updated COI is received, update the compliance record.",
+            "Then mark Done."
+        ]
+        status="**Open:** not started. **In Progress:** preparing/requesting. **Waiting:** vendor/subcontractor owes the document. **Done:** valid COI received and tracker updated."
+    else:
+        steps=[
+            "Read the task detail and find the related Inbox message/project record.",
+            "Identify the required outcome—not just the first action.",
+            "Identify which person/process owns the information or approval you need.",
+            "Complete the work using the appropriate simulator tool.",
+            "Use Waiting if another party owes the next action.",
+            "Mark Done only when the requested outcome is complete and documented."
+        ]
+        status="**Open:** not started. **In Progress:** you are actively working. **Waiting:** another person owns the next action. **Done:** the required outcome is complete and documented."
+    return {"steps":steps,"status":status,"detail":detail}
+
 def career():
     state=sim_state()
     career_cleanup_duplicate_messages()
@@ -2973,82 +3112,51 @@ def career():
         st.subheader("Project Inbox")
         pending=rows("SELECT * FROM career_reaction_queue ORDER BY due_minute,id")
         if pending:
-            st.caption(f"Project activity is live • {len(pending)} future response/follow-up event{'s' if len(pending)!=1 else ''} are scheduled but will stay hidden until simulated time reaches them.")
+            st.caption(f"Project activity is live • {len(pending)} future response/follow-up event{'s' if len(pending)!=1 else ''} stay hidden until simulated time reaches them.")
         else:
             st.caption("Only messages that have actually arrived by the current simulated time appear here.")
+
         visible_messages=[
             m for m in rows("SELECT * FROM career_messages ORDER BY id DESC")
             if _career_clock_to_minutes(m["received_time"]) <= int(state["minutes"])
         ]
+
+        selected_msg=None
         if not visible_messages:
             st.info(f"No messages have arrived yet at {sim_time(state)}. Incoming email will populate as simulated time moves.")
-        for m in visible_messages:
-            icon="●" if not m["read"] else "○"
-            with st.expander(f"{icon} {m['received_time']} · {m['sender']} — {m['subject']}"):
-                execute("UPDATE career_messages SET read=1 WHERE id=?",(m["id"],))
-                st.write(m["body"])
-        training_box("Project Email",state)
-
-        inspection_task=rows("SELECT * FROM career_tasks WHERE task_key='T1' AND status!='Done' LIMIT 1")
-        if inspection_task:
-            training_coach(state,"Inspection Follow-up","Get the framing inspection confirmed before 8:30 AM and close the loop with Dana.",[
-                "Read Dana's message and identify exactly what she needs.",
-                "Use Team to identify who controls inspection scheduling: Inspection Agency.",
-                "Compose to Inspection Agency and CC Dana Lewis · Superintendent.",
-                "Use a clear project/request subject.",
-                "Ask for the date/time, explain drywall is tomorrow, and state the before-8:30 AM deadline.",
-                "Send it. Do not mark the task Done yet; you still need confirmation.",
-                "Wait for the response in simulated time and follow up if needed.",
-                "When confirmation arrives, communicate it to Dana/field, then close the task."
-            ],"Dana needs controlled information before sequencing drywall. Your job is to obtain it, document it, and close the loop.",
-            "Inbox = request/deadline · Team = responsible contact · Calendar = deadline/drywall mobilization.")
+        else:
+            opts={f"{m['received_time']} · {m['sender']} — {m['subject']}":m for m in visible_messages}
+            labels=list(opts.keys())
+            current=st.session_state.get("career_selected_message_label")
+            idx=labels.index(current) if current in labels else 0
+            pick=st.selectbox("Select an Inbox message to work",labels,index=idx,key="career_selected_message_label")
+            selected_msg=opts[pick]
+            execute("UPDATE career_messages SET read=1 WHERE id=?",(selected_msg["id"],))
             with st.container(border=True):
-                st.markdown("#### 🧭 Training help · Inspection confirmation")
-                st.write("Dana is asking you to **chase the framing inspection confirmation**. You are not confirming the inspection yourself — you need to contact the party that controls the inspection schedule.")
-                st.markdown("""
-1. Email **Inspection Agency**.
-2. Use a clear subject such as **FC-2417 — Framing inspection confirmation needed**.
-3. State that drywall is scheduled tomorrow and ask them to **confirm the inspection date/time**.
-4. Give the deadline: **before 8:30 AM today**.
-5. CC **Dana Lewis · Superintendent** because she needs the confirmation for field sequencing.
-6. Send it. The Inspection Agency should respond in simulated time; when the actual confirmation arrives, distribute it to the field team.
-""")
-                st.caption("You can use the example as guidance, but type/send the project email yourself in the Compose section below.")
+                st.markdown(f"### {selected_msg['subject']}")
+                st.caption(f"{selected_msg['received_time']} · From: {selected_msg['sender']}")
+                st.write(selected_msg["body"])
 
-        rfi_needed=rows("SELECT * FROM career_tasks WHERE task_key LIKE 'CREATE_RFI_%' AND status!='Done' ORDER BY id DESC LIMIT 1")
-        if rfi_needed:
-            with st.container(border=True):
-                st.warning("📄 A formal RFI is required for your current design question.")
-                st.write(rfi_needed[0]["detail"])
-                if st.button("Open RFI Desk →",use_container_width=True,key="jump_to_rfi_from_email"):
-                    st.session_state["career_jump_rfi"]=True
-                    st.info("Use the **RFI Desk** tab above to complete the formal request.")
-        st.markdown("#### Compose / reply")
+        st.markdown("#### Reply / take action")
+        recipient_choices=[
+            "Marcus Reed · Project Manager","Dana Lewis · Superintendent","Avery Chen · Architect",
+            "Nia Brooks · Owner Representative","Apex Electric","Door Hardware Vendor",
+            "Metro Interiors","Inspection Agency","Accounting"
+        ]
+        if selected_msg:
+            # Helpful default recipient when a direct reply makes sense.
+            sender=selected_msg["sender"]
+            default_to=next((x for x in recipient_choices if x.split(" · ")[0] in sender or sender.split(" · ")[0] in x),recipient_choices[0])
+            default_idx=recipient_choices.index(default_to)
+        else:
+            default_idx=0
+
         with st.form("career_compose",clear_on_submit=True):
-            recipient=st.selectbox("To",[
-                "Marcus Reed · Project Manager",
-                "Dana Lewis · Superintendent",
-                "Avery Chen · Architect",
-                "Nia Brooks · Owner Representative",
-                "Apex Electric",
-                "Door Hardware Vendor",
-                "Metro Interiors",
-                "Inspection Agency",
-                "Accounting"
-            ])
-            cc=st.multiselect("CC",[
-                "Marcus Reed · Project Manager",
-                "Dana Lewis · Superintendent",
-                "Avery Chen · Architect",
-                "Nia Brooks · Owner Representative",
-                "Apex Electric",
-                "Door Hardware Vendor",
-                "Metro Interiors",
-                "Inspection Agency",
-                "Accounting"
-            ])
-            subject=st.text_input("Subject")
-            body=st.text_area("Message",height=130)
+            recipient=st.selectbox("To",recipient_choices,index=default_idx)
+            cc=st.multiselect("CC",recipient_choices)
+            default_subject=("RE: "+selected_msg["subject"]) if selected_msg else ""
+            subject=st.text_input("Subject",value=default_subject)
+            body=st.text_area("Reply / message",height=140)
             sent=st.form_submit_button("Send Email",use_container_width=True)
             if sent:
                 sent_id=execute("INSERT INTO career_sent(sent_time,recipient,cc,subject,body) VALUES(?,?,?,?,?)",(sim_time(state),recipient,", ".join(cc),subject,body))
@@ -3057,8 +3165,27 @@ def career():
                 sent_at=sim_time(state)
                 advance_sim(state,8)
                 career_reactions(state)
-                st.session_state["career_sent_ok"]=f"✓ SENT at {sent_at}. It is saved in Sent Mail. The project is continuing to react as simulated time moves."
-        if st.session_state.get("career_sent_ok"): st.success(st.session_state.pop("career_sent_ok"))
+                st.session_state["career_sent_ok"]=f"✓ SENT at {sent_at}. It is saved in Sent Mail. The project will react as simulated time moves."
+
+        # Exactly below the reply box: explain selected message and how to respond.
+        if state["mode"]=="Training" and selected_msg:
+            guide=career_message_training(selected_msg)
+            with st.container(border=True):
+                st.markdown("### 🎓 Training Coach · This Message")
+                st.markdown(f"**What they are asking:** {guide['ask']}")
+                with st.expander("Why this matters",expanded=True):
+                    st.write(guide["why"])
+                st.markdown(f"**Correct process:** {guide['process']}")
+                st.markdown("**Your response/action should include:**")
+                for item in guide["include"]:
+                    st.write("• "+item)
+                st.markdown(f"**What happens after you respond:** {guide['next']}")
+                st.info("**When to change the task status**  \n"+guide["status"])
+                st.caption("The coach explains the workflow; you still choose the recipient/process and write the response yourself.")
+
+        if st.session_state.get("career_sent_ok"):
+            st.success(st.session_state.pop("career_sent_ok"))
+
         sentmail=rows("SELECT * FROM career_sent ORDER BY id DESC LIMIT 10")
         if sentmail:
             st.markdown("#### Sent Mail")
@@ -3067,9 +3194,37 @@ def career():
                     st.write(x["body"]); st.caption("CC: "+(x["cc"] or "none"))
     with tabs[2]:
         st.subheader("My Work Queue")
-        for t in rows("SELECT * FROM career_tasks ORDER BY due_time"):
+        tasks=rows("SELECT * FROM career_tasks ORDER BY due_time")
+        if not tasks:
+            st.info("No tasks have arrived yet. New work will populate as messages/requests come in.")
+        else:
+            task_opts={f"{t['due_time']} · {t['priority']} · {t['title']}":t for t in tasks}
+            labels=list(task_opts.keys())
+            current=st.session_state.get("career_selected_task_label")
+            idx=labels.index(current) if current in labels else 0
+            pick=st.selectbox("Select a task to work",labels,index=idx,key="career_selected_task_label")
+            t=task_opts[pick]
+
             with st.container(border=True):
-                a,b=st.columns([5,1]); a.markdown(f"**{t['title']}** · {t['area']} · {t['priority']} · Due {t['due_time']} — {t['detail']}"); opts=["Open","In Progress","Waiting","Done"]; new=b.selectbox("Status",opts,index=opts.index(t["status"]),key="stat_"+t["task_key"],label_visibility="collapsed")
+                st.markdown(f"### {t['title']}")
+                c=st.columns(3)
+                c[0].metric("Priority",t["priority"])
+                c[1].metric("Due",t["due_time"])
+                c[2].metric("Current status",t["status"])
+                st.write(t["detail"])
+
+                if state["mode"]=="Training":
+                    guide=career_task_training(t)
+                    st.markdown("### 🎓 Training Coach · How to Complete This Task")
+                    for i,step in enumerate(guide["steps"],1):
+                        st.markdown(f"**Step {i} of {len(guide['steps'])}** — {step}")
+                    st.markdown("#### When should I change the status?")
+                    st.info(guide["status"])
+                    st.caption("Important: **Done means the requested outcome is complete**, not merely that you sent the first email or started the process.")
+
+                st.markdown("#### Update task status")
+                opts=["Open","In Progress","Waiting","Done"]
+                new=st.selectbox("Status",opts,index=opts.index(t["status"]),key="stat_"+t["task_key"])
                 if new!=t["status"]:
                     old_status=t["status"]
                     execute("UPDATE career_tasks SET status=?,completed_at=? WHERE id=?",(new,sim_time(state) if new=="Done" else None,t["id"]))
@@ -3077,8 +3232,18 @@ def career():
                     advance_sim(state,6)
                     career_reactions(state)
                     if outcome=="reopened":
-                        st.session_state["task_reaction_notice"]="⚠️ The task was reopened because the simulator could not find the work required to support completion."
+                        st.session_state["task_reaction_notice"]="⚠️ This task was reopened because ChapLife could not find the work/evidence required to support Done."
                     st.rerun()
+
+            # Compact queue below, so the learner still sees the rest of the workload.
+            st.markdown("#### Rest of my queue")
+            compact=[]
+            for x in tasks:
+                if x["id"]!=t["id"]:
+                    compact.append({"Due":x["due_time"],"Priority":x["priority"],"Task":x["title"],"Status":x["status"]})
+            if compact:
+                st.dataframe(pd.DataFrame(compact),use_container_width=True,hide_index=True)
+
         if st.session_state.get("task_reaction_notice"):
             st.warning(st.session_state.pop("task_reaction_notice"))
     with tabs[3]:
@@ -3661,6 +3826,10 @@ def settings_page():
         st.info('🔄 Automatic sync runs every **2 minutes** while ChapLife is open. Saves also continue syncing after normal app changes, and the manual Sync button remains available.')
         st.write('The app code remains on GitHub, while your ChapLife database is stored as private per-user cloud state protected by Supabase authentication and Row Level Security.')
         st.warning('Do not upload `chaplife.db`, financial exports, health screenshots, medicine-label photos, passwords, or API credentials to the public GitHub repository.')
+        devmode=st.toggle('Developer Mode (show technical diagnostics)',value=bool(get_setting('developer_mode',False)),key='developer_mode_toggle')
+        if devmode!=bool(get_setting('developer_mode',False)):
+            set_setting('developer_mode',devmode); st.rerun()
+        st.caption('Developer Mode is off by default. Normal ChapLife use keeps technical error details hidden.')
         st.caption(f"Last sync: {st.session_state.get('_cloud_last_sync','this session')}")
         c=st.columns(2)
         if c[0].button('☁️ Back up to cloud now',use_container_width=True,key='settings_cloud_push'):
@@ -3797,16 +3966,23 @@ if page=='Growth Lab' and not bool(get_setting('show_growth_section',False)):
     page='Home'; st.session_state.page='Home'
 if page=='Conversation & Current Events' and not bool(get_setting('show_conversation_section',False)):
     page='Home'; st.session_state.page='Home'
-if page=='Home': home()
-elif page=='Finances': finances()
-elif page=='Food & Nutrition': food()
-elif page=='Grocery Shopping': grocery()
-elif page=='My Trainer': trainer()
-elif page=='Water & Jug Puzzles': water_page()
-elif page=='Vocabulary': vocabulary()
-elif page=='Growth Lab': growth()
-elif page=='Conversation & Current Events': current_events()
-elif page=='Health & Life': health()
-elif page=='Career Simulator': career()
-elif page=='My Progress': progress()
-elif page=='Settings': settings_page()
+
+_renderers={
+    'Home':home,
+    'Finances':finances,
+    'Food & Nutrition':food,
+    'Grocery Shopping':grocery,
+    'My Trainer':trainer,
+    'Water & Jug Puzzles':water_page,
+    'Vocabulary':vocabulary,
+    'Growth Lab':growth,
+    'Conversation & Current Events':current_events,
+    'Health & Life':health,
+    'Career Simulator':career,
+    'My Progress':progress,
+    'Settings':settings_page
+}
+try:
+    _renderers.get(page,home)()
+except Exception:
+    friendly_app_error(page)
