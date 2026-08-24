@@ -1313,48 +1313,60 @@ sc('CRS-305','Crisis: Bad News Before Client Call','Crisis Day','Crisis','Ten mi
 
 
 def career_seed_day():
-    # Seed the work queue immediately, but release inbox messages only when simulated time reaches them.
-    tasks=[
-        ("T1","Confirm framing inspection","Inspections","URGENT","Open","08:30","Drywall is scheduled tomorrow. Confirmation has not been received."),
-        ("T2","Route RFI-017: outlet mounting heights","RFIs","High","Open","09:15","Electrical is waiting on clarification between E-201 and A-402."),
-        ("T3","Prepare OAC meeting packet","Meetings","High","Open","09:45","Current RFI log, submittal log, procurement risks and 3-week look-ahead."),
-        ("T4","Review Apex Electric pay app","Cost","Medium","Open","12:00","Pay app requests 90%; field report indicates roughly 70% installed."),
-        ("T5","Follow up on door hardware submittal","Submittals","High","Open","11:00","Long-lead hardware approval is late and may affect turnover."),
-        ("T6","Update COI tracker","Compliance","Medium","Open","15:00","Metro Interiors COI expires Friday.")
-    ]
-    for x in tasks:
-        execute("INSERT OR IGNORE INTO career_tasks(task_key,title,area,priority,status,due_time,detail) VALUES(?,?,?,?,?,?,?)",x)
-
+    """Seed incoming work as scheduled messages. A task appears when the request actually arrives."""
     state=sim_state()
     now=int(state["minutes"])
+
     seeded=[
+        # msg key, arrival minute, sender, subject, body, task metadata
         ("M1",454,"Dana Lewis · Superintendent","Inspection confirmation needed",
-         "Morning — I still do not have confirmation for the framing inspection. Drywall is supposed to start tomorrow. Can you chase this before 8:30?"),
+         "Morning — I still do not have confirmation for the framing inspection. Drywall is supposed to start tomorrow. Can you chase this before 8:30?",
+         "T1","Confirm framing inspection","Inspections","URGENT","08:30","Drywall is scheduled tomorrow. Confirmation has not been received."),
+
         ("M2",461,"Marcus Reed · Project Manager","OAC packet before 10 AM",
-         "Please send me the current RFI/submittal logs and top procurement risks before the owner meeting. Flag anything you are not confident is current."),
+         "Please send me the current RFI/submittal logs and top procurement risks before the owner meeting. Flag anything you are not confident is current.",
+         "T3","Prepare OAC meeting packet","Meetings","High","09:45","Current RFI log, submittal log, procurement risks and 3-week look-ahead."),
+
         ("M3",466,"Apex Electric · PM","RFI 017 holding Rooms 204–210",
-         "We have two different outlet heights in the documents. Crew is moving to another area, but we need direction today."),
+         "We have two different outlet heights in the documents. Crew is moving to another area, but we need direction today.",
+         "T2","Route RFI-017: outlet mounting heights","RFIs","High","09:15","Electrical is waiting on clarification between E-201 and A-402."),
+
         ("M4",472,"Accounting","Pay application cutoff today",
-         "Apex Electric pay application must be approved or returned by 3:00 PM to make this cycle."),
+         "Apex Electric pay application must be approved or returned by 3:00 PM to make this cycle.",
+         "T4","Review Apex Electric pay app","Cost","Medium","12:00","Pay app requests 90%; field report indicates roughly 70% installed."),
+
         ("M5",483,"Door Hardware Vendor","RE: Hardware package",
-         "Factory slot may be lost if approved submittal is not released this week. Current quoted lead time is 10–12 weeks.")
+         "Factory slot may be lost if approved submittal is not released this week. Current quoted lead time is 10–12 weeks.",
+         "T5","Follow up on door hardware submittal","Submittals","High","11:00","Long-lead hardware approval is late and may affect turnover."),
+
+        ("M6",500,"Jasmine Cole · Accounting","Metro Interiors COI expires Friday",
+         "Metro Interiors' Certificate of Insurance expires Friday. Please request the updated COI and update the compliance tracker when it comes in.",
+         "T6","Update COI tracker","Compliance","Medium","15:00","Metro Interiors COI expires Friday.")
     ]
 
-    for key,at,sender,subject,body in seeded:
-        # Migration fix for old builds: remove a seeded message if it was exposed before its simulated timestamp.
-        existing=rows("SELECT id FROM career_messages WHERE msg_key=?",(key,))
-        if existing and now < at:
-            execute("DELETE FROM career_messages WHERE msg_key=?",(key,))
-            existing=[]
+    for key,at,sender,subject,body,tkey,ttitle,tarea,tpriority,tdue,tdetail in seeded:
+        existing_msg=rows("SELECT id FROM career_messages WHERE msg_key=?",(key,))
+        existing_task=rows("SELECT id,status FROM career_tasks WHERE task_key=?",(tkey,))
+
+        # Migration cleanup: a future request should not already be visible as a task/message.
+        if now < at:
+            if existing_msg:
+                execute("DELETE FROM career_messages WHERE msg_key=?",(key,))
+                existing_msg=[]
+            if existing_task:
+                execute("DELETE FROM career_tasks WHERE task_key=?",(tkey,))
+                existing_task=[]
 
         if now >= at:
-            # Once the simulated clock reaches the timestamp, place it in the inbox.
-            if not existing:
+            if not existing_msg:
                 execute("INSERT OR IGNORE INTO career_messages(msg_key,sender,subject,body,received_time) VALUES(?,?,?,?,?)",
                         (key,sender,subject,body,_career_time_from_minutes(at)))
                 career_activity(state,"Incoming",subject,body)
+            if not rows("SELECT id FROM career_tasks WHERE task_key=?",(tkey,)):
+                execute("""INSERT OR IGNORE INTO career_tasks(task_key,title,area,priority,status,due_time,detail)
+                           VALUES(?,?,?,?,?,?,?)""",(tkey,ttitle,tarea,tpriority,"Open",tdue,tdetail))
+                career_activity(state,"New Task",ttitle,f"Created from {sender}'s { _career_time_from_minutes(at) } message.")
         else:
-            # Future messages live only in the reaction queue until their time arrives.
             rtype="Seed:"+key
             queued=rows("SELECT id FROM career_reaction_queue WHERE reaction_type=?",(rtype,))
             if not queued:
@@ -1362,7 +1374,7 @@ def career_seed_day():
                     source_sent_id,due_minute,sender,subject,body,reaction_type,
                     task_key,task_title,task_area,task_priority,task_due_time,task_detail
                 ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (None,at,sender,subject,body,rtype,None,None,None,None,None,None))
+                (None,at,sender,subject,body,rtype,tkey,ttitle,tarea,tpriority,tdue,tdetail))
 
 def sim_state():
     state=get_setting("career_workday",None)
@@ -1769,6 +1781,19 @@ def career_schedule_email_reactions(state,sent_id,recipient,cc,subject,body):
 def career_process_reaction_queue(state):
     due=rows("SELECT * FROM career_reaction_queue WHERE due_minute<=? ORDER BY due_minute,id",(int(state["minutes"]),))
     for q in due:
+        rtype=q["reaction_type"] or ""
+
+        # Conditional reminders/escalations disappear silently if the related task was completed early.
+        if rtype.startswith("COND["):
+            close=rtype.find("]")
+            cond_key=rtype[5:close] if close>5 else ""
+            if cond_key:
+                task=rows("SELECT status FROM career_tasks WHERE task_key=?",(cond_key,))
+                if task and task[0]["status"]=="Done":
+                    career_activity(state,"Prevented Reminder",q["subject"],f"No message sent because {cond_key} was already completed.")
+                    execute("DELETE FROM career_reaction_queue WHERE id=?",(q["id"],))
+                    continue
+
         key=f"AUTO_{q['id']}"
         if not rows("SELECT id FROM career_messages WHERE msg_key=?",(key,)):
             execute("INSERT INTO career_messages(msg_key,sender,subject,body,received_time) VALUES(?,?,?,?,?)",
@@ -1778,27 +1803,65 @@ def career_process_reaction_queue(state):
                 execute("""INSERT OR IGNORE INTO career_tasks(task_key,title,area,priority,status,due_time,detail)
                            VALUES(?,?,?,?,?,?,?)""",
                         (q["task_key"],q["task_title"],q["task_area"],q["task_priority"],"Open",q["task_due_time"],q["task_detail"]))
+                if q["reaction_type"] and str(q["reaction_type"]).startswith("Seed:"):
+                    career_activity(state,"New Task",q["task_title"],f"Created from the incoming {q['subject']} message.")
         execute("DELETE FROM career_reaction_queue WHERE id=?",(q["id"],))
 
 def career_reactions(state):
-    # Events appear as the simulated clock crosses realistic times.
-    mins=state["minutes"]
-    events=[
-        ("EV900",540,"Dana Lewis · Superintendent","9:00 field follow-up","I need the RFI number for the outlet-height conflict before electrical returns to Rooms 204–210."),
-        ("EV945",585,"Marcus Reed · Project Manager","OAC meeting in 15 minutes","Please make sure the current RFI status and Apex billing discrepancy are ready for the 10:00 meeting."),
-        ("EV1030",630,"Avery Chen · Architect","RE: RFI-017","If RFI-017 has been routed with the drawing references, I can turn the clarification today."),
-        ("EV1145",705,"Marcus Reed · Project Manager","Before lunch status","Send me what is still open from this morning and anything that could affect tomorrow's work.")
-    ]
-    for key,at,sender,subject,body in events:
+    """Timed project events only fire when they are still relevant."""
+    mins=int(state["minutes"])
+
+    def task_open(key):
+        r=rows("SELECT status FROM career_tasks WHERE task_key=?",(key,))
+        return bool(r) and r[0]["status"]!="Done"
+
+    def send_once(key,at,sender,subject,body):
         if mins>=at and not rows("SELECT id FROM career_messages WHERE msg_key=?",(key,)):
-            execute("INSERT INTO career_messages(msg_key,sender,subject,body,received_time) VALUES(?,?,?,?,?)",(key,sender,subject,body,sim_time({"minutes":at})))
+            execute("INSERT INTO career_messages(msg_key,sender,subject,body,received_time) VALUES(?,?,?,?,?)",
+                    (key,sender,subject,body,_career_time_from_minutes(at)))
             career_activity(state,"Incoming",subject,body)
+
+    # 9:00 field reminder only if the RFI work is still unresolved.
+    if task_open("T2"):
+        send_once("EV900",540,"Dana Lewis · Superintendent","9:00 field follow-up",
+                  "I still need the RFI number for the outlet-height conflict before electrical returns to Rooms 204–210.")
+
+    # 9:45 meeting reminder reflects only unfinished prep items.
+    if mins>=585 and not rows("SELECT id FROM career_messages WHERE msg_key='EV945'"):
+        missing=[]
+        if task_open("T3"): missing.append("OAC packet")
+        if task_open("T2"): missing.append("RFI status")
+        if task_open("T4"): missing.append("Apex billing review")
+        if missing:
+            send_once("EV945",585,"Marcus Reed · Project Manager","OAC meeting in 15 minutes",
+                      "Before the 10:00 meeting, I still need: "+", ".join(missing)+". Please tighten up what is still open.")
+        else:
+            career_activity(state,"Prevented Reminder","OAC meeting reminder suppressed","All related preparation was completed before 9:45.")
+
+    # No generic architect chase if the RFI task has already been completed/routed.
+    if task_open("T2"):
+        send_once("EV1030",630,"Avery Chen · Architect","RE: RFI-017",
+                  "I still don't see a complete RFI with the drawing references. If you route it, I can review the clarification.")
+
+    # Before-lunch status appears only if actual morning work remains open.
+    if mins>=705 and not rows("SELECT id FROM career_messages WHERE msg_key='EV1145'"):
+        open_items=[]
+        for k,label in [("T1","inspection"),("T2","RFI"),("T3","OAC packet"),("T4","pay app"),("T5","hardware submittal")]:
+            if task_open(k): open_items.append(label)
+        if open_items:
+            send_once("EV1145",705,"Marcus Reed · Project Manager","Before lunch status",
+                      "Before lunch, send me the status of the items still open: "+", ".join(open_items)+".")
+        else:
+            career_activity(state,"Prevented Reminder","Before-lunch status suppressed","Morning work was already completed.")
+
 
 
 def career_queue_message(state,delay,sender,subject,body,reaction_type="Project Reaction",
-                         task_key=None,task_title=None,task_area=None,task_priority=None,task_due_time=None,task_detail=None):
+                         task_key=None,task_title=None,task_area=None,task_priority=None,task_due_time=None,task_detail=None,
+                         cancel_if_done=None):
+    stored_type=f"COND[{cancel_if_done}]::{reaction_type}" if cancel_if_done else reaction_type
     _queue_reaction(
-        None,int(state["minutes"])+delay,sender,subject,body,reaction_type,
+        None,int(state["minutes"])+delay,sender,subject,body,stored_type,
         task_key,task_title,task_area,task_priority,task_due_time,task_detail
     )
 
@@ -1826,15 +1889,15 @@ def career_task_status_reaction(state,t,old_status,new_status):
         if t["priority"]=="URGENT":
             career_queue_message(state,7,"Marcus Reed · Project Manager","Status check — "+title,
                                  "I see you picked this up. What is the blocker, who owns the next response, and when should I expect an update?",
-                                 "PM Status Check")
+                                 "PM Status Check",cancel_if_done=key)
         elif key=="T4":
             career_queue_message(state,9,"Jasmine Cole · Accounting","Apex pay app timing",
                                  "Thanks for picking this up. Reminder: I need a supported amount before the payment-run cutoff.",
-                                 "Deadline Reminder")
+                                 "Deadline Reminder",cancel_if_done=key)
         else:
             career_queue_message(state,12,"Marcus Reed · Project Manager","RE: "+title,
                                  "Thanks. Keep the task status current and document the outcome when you close it.",
-                                 "PM Coaching")
+                                 "PM Coaching",cancel_if_done=key)
 
     elif new_status=="Waiting":
         # Waiting without communication is not enough.
@@ -1844,7 +1907,8 @@ def career_task_status_reaction(state,t,old_status,new_status):
                              "Waiting Follow-up",
                              task_key=f"WAITFOLLOW_{key}_{state['minutes']}",task_title="Set follow-up for "+title,
                              task_area=t["area"],task_priority="High",task_due_time=_career_time_from_minutes(int(state["minutes"])+30),
-                             task_detail="Document who owns the response and perform a follow-up if it has not arrived.")
+                             task_detail="Document who owns the response and perform a follow-up if it has not arrived.",
+                             cancel_if_done=key)
 
     elif new_status=="Done":
         if not career_has_evidence(key):
@@ -1855,6 +1919,12 @@ def career_task_status_reaction(state,t,old_status,new_status):
                                  "Completion Rejected")
             career_activity(state,"Quality Control",title+" reopened","Marked Done without required supporting evidence.")
             return "reopened"
+
+        # Remove any pending reminders that existed only because this task had not been completed yet.
+        queued=rows("SELECT id,reaction_type FROM career_reaction_queue")
+        for q in queued:
+            if (q["reaction_type"] or "").startswith(f"COND[{key}]"):
+                execute("DELETE FROM career_reaction_queue WHERE id=?",(q["id"],))
 
         if key=="T2":
             career_queue_message(state,5,"Dana Lewis · Superintendent","RFI routed — field needs the response",
@@ -1950,6 +2020,7 @@ def career():
     tabs=st.tabs(["🖥️ Today","📧 Inbox","✅ Tasks","📄 RFI Desk","💵 Cost Desk","📅 Calendar","👥 Team","📚 Training Library","🔥 Scenario Lab","📈 Performance"])
     with tabs[0]:
         st.subheader("Monday Morning · Project Command Center")
+        st.caption("Work enters your queue when requests/messages arrive. If you finish an item before a scheduled reminder, that reminder is suppressed.")
         c=st.columns(3)
         c[0].error("🔴 2 urgent — Inspection + RFI holding field work")
         c[1].warning("🟠 4 due today — OAC packet · pay app · submittal follow-up")
