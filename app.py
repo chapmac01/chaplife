@@ -1384,7 +1384,7 @@ def advance_sim(state,mins=10):
 TRAINING_GUIDES={
 "RFI":{
 "what":"An RFI (Request for Information) formally asks the design team to clarify missing, conflicting, or unclear contract information. An email can alert someone to the issue, but if the field needs formal design direction, the clarification should be captured in the RFI record.",
-"steps":["Check the latest drawing/spec revision first.","Use a short, searchable subject.","Reference the exact drawing/detail/spec and location.","Describe the conflict factually.","Ask one clear question; do not guess the design answer.","Route it to the proper design contact and copy the PM/Superintendent as required.","Log the response and distribute the clarification to the field."],
+"steps":["Open Document Control below and verify the latest drawing/spec revision before drafting the RFI.","Use a short, searchable subject.","Reference the exact drawing/detail/spec and location.","Describe the conflict factually.","Ask one clear question; do not guess the design answer.","Route it to the proper design contact and copy the PM/Superintendent as required.","Log the response and distribute the clarification to the field."],
 "example":'Subject: Receptacle mounting height — Rooms 204–210\nReferences: A-402 Interior Elevation 2 / E-201 Detail 3\nQuestion: A-402 indicates receptacles at 18" AFF while E-201 indicates 24" AFF in Rooms 204–210. Please confirm the required mounting height.',
 "mistakes":"Vague questions, no drawing reference, multiple unrelated issues in one RFI, blame language, or telling the trade to guess."
 },
@@ -2056,12 +2056,50 @@ def career():
         st.subheader("RFI Desk")
         training_box("RFI",state)
         st.warning("Electrical is waiting: E-201 and A-402 show conflicting outlet mounting heights in Rooms 204–210.")
+
+        st.markdown("#### 📚 Document Control")
+        st.caption("This is where you perform Step 1. Verify that the drawings/specifications you are about to reference are current.")
+        current_docs=pd.DataFrame([
+            ["A-402","Architectural","Interior Elevations / Device Locations","Rev 3","2026-08-18","CURRENT"],
+            ["E-201","Electrical","Second Floor Power Plan","Rev 2","2026-08-12","CURRENT"],
+            ["A-501","Architectural","Wall Details","Rev 1","2026-07-29","CURRENT"],
+            ["E-501","Electrical","Electrical Details","Rev 1","2026-07-30","CURRENT"],
+            ["26 27 26","Specification","Wiring Devices","IFC","2026-08-01","CURRENT"]
+        ],columns=["Document","Discipline","Title","Revision","Issued","Status"])
+        st.dataframe(current_docs,use_container_width=True,hide_index=True)
+        with st.expander("🗂️ Superseded revisions — archive"):
+            st.dataframe(pd.DataFrame([
+                ["A-402","Rev 2","2026-08-02","SUPERSEDED by Rev 3"],
+                ["E-201","Rev 1","2026-07-25","SUPERSEDED by Rev 2"]
+            ],columns=["Document","Revision","Issued","Status"]),use_container_width=True,hide_index=True)
+
+        checked=st.multiselect(
+            "Which current documents did you verify for this conflict?",
+            ["A-402 · Rev 3","E-201 · Rev 2","A-501 · Rev 1","E-501 · Rev 1","Spec 26 27 26 · IFC"],
+            key="rfi_doc_verify"
+        )
+        if st.button("✓ Verify Revisions",use_container_width=True,key="rfi_verify_revisions"):
+            if {"A-402 · Rev 3","E-201 · Rev 2"}.issubset(set(checked)):
+                st.session_state["rfi_revision_verified"]=True
+                career_activity(state,"Document Control","RFI documents verified","A-402 Rev 3 and E-201 Rev 2 verified as current.")
+                st.success("Step 1 complete: A-402 Rev 3 and E-201 Rev 2 are current.")
+            else:
+                st.session_state["rfi_revision_verified"]=False
+                st.warning("This conflict is between A-402 and E-201. Check the current revision of both documents.")
+        if st.session_state.get("rfi_revision_verified"):
+            st.success("✓ Current revisions verified. You can now draft the RFI.")
+        else:
+            st.info("Before drafting: verify both A-402 and E-201 above.")
+
         with st.form("rfi_form",clear_on_submit=True):
             subject=st.text_input("Subject",placeholder="Receptacle mounting height — Rooms 204–210")
             refs=st.text_input("Drawing / spec references",placeholder="A-402 Interior Elevation 2; E-201 Detail 3",help="Use exact document references.")
             question=st.text_area("Question / requested clarification",height=130,placeholder="State the conflict factually and ask one clear question.")
             impact=st.selectbox("Potential impact",["None known","Schedule","Cost","Schedule + Cost","Field coordination","Other"])
             route=st.form_submit_button("Route RFI",use_container_width=True)
+            if route and state["mode"]=="Training" and not st.session_state.get("rfi_revision_verified"):
+                st.session_state["rfi_verify_warning"]="Complete Step 1 in Document Control before routing the RFI."
+                route=False
             if route:
                 num=f"RFI-{17+len(rows('SELECT id FROM career_rfis')):03d}"
                 status="Awaiting Response"
@@ -2091,6 +2129,8 @@ def career():
                                          "Field Pressure")
                 career_reactions(state)
         if st.session_state.get("rfi_ok"): st.success(st.session_state.pop("rfi_ok"))
+        if st.session_state.get("rfi_verify_warning"):
+            st.warning(st.session_state.pop("rfi_verify_warning"))
         st.markdown("#### RFI Log")
         for r in rows("SELECT * FROM career_rfis ORDER BY id DESC"):
             with st.expander(f"{r['rfi_no']} · {r['subject'] or 'Untitled'} · {r['status']}"):
