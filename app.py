@@ -1,6 +1,6 @@
 import streamlit as st
 import streamlit.components.v1 as components
-import sqlite3, json, math, random, urllib.parse, urllib.request, xml.etree.ElementTree as ET, re, html
+import sqlite3, json, math, random, urllib.parse, urllib.request, urllib.error, xml.etree.ElementTree as ET, re, html, base64, os
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from collections import deque, defaultdict
@@ -106,12 +106,15 @@ def get_setting(key, default=None):
 
 def set_setting(key, value):
     c=db(); c.execute('INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)',(key,json.dumps(value))); c.commit(); c.close()
+    _maybe_cloud_push()
 
 def rows(sql, params=()):
     c=db(); out=c.execute(sql,params).fetchall(); c.close(); return out
 
 def execute(sql, params=()):
-    c=db(); cur=c.execute(sql,params); c.commit(); lid=cur.lastrowid; c.close(); return lid
+    c=db(); cur=c.execute(sql,params); c.commit(); lid=cur.lastrowid; c.close()
+    _maybe_cloud_push()
+    return lid
 
 def delete_row(table, row_id): execute(f'DELETE FROM {table} WHERE id=?',(row_id,))
 
@@ -122,6 +125,193 @@ def df_from(query, params=()):
     return pd.DataFrame([dict(r) for r in rs]) if rs else pd.DataFrame()
 
 init_db()
+
+# ---------- Private Cloud Sync ----------
+def _secret(name, default=""):
+    try:
+        return str(st.secrets.get(name, default)).strip()
+    except Exception:
+        return default
+
+SUPABASE_URL=_secret("SUPABASE_URL").rstrip("/")
+SUPABASE_KEY=_secret("SUPABASE_PUBLISHABLE_KEY")
+CLOUD_CONFIGURED=bool(SUPABASE_URL and SUPABASE_KEY)
+
+def _http_json(url, method="GET", payload=None, token=None, extra_headers=None):
+    headers={"apikey":SUPABASE_KEY,"Content-Type":"application/json"}
+    if token:
+        headers["Authorization"]="Bearer "+token
+    if extra_headers:
+        headers.update(extra_headers)
+    data=None if payload is None else json.dumps(payload).encode("utf-8")
+    req=urllib.request.Request(url,data=data,headers=headers,method=method)
+    try:
+        with urllib.request.urlopen(req,timeout=20) as r:
+            raw=r.read().decode("utf-8")
+            return json.loads(raw) if raw else {}
+    except urllib.error.HTTPError as e:
+        body=e.read().decode("utf-8",errors="ignore")
+        try:
+            detail=json.loads(body)
+            msg=detail.get("msg") or detail.get("message") or detail.get("error_description") or detail.get("error") or body
+        except Exception:
+            msg=body or str(e)
+        raise RuntimeError(msg)
+
+def cloud_sign_in(email,password):
+    return _http_json(
+        f"{SUPABASE_URL}/auth/v1/token?grant_type=password",
+        "POST",{"email":email,"password":password}
+    )
+
+def cloud_sign_up(email,password):
+    return _http_json(
+        f"{SUPABASE_URL}/auth/v1/signup",
+        "POST",{"email":email,"password":password}
+    )
+
+def _cloud_session():
+    return st.session_state.get("_chaplife_cloud_session") or {}
+
+def _cloud_headers():
+    s=_cloud_session()
+    return s.get("access_token"),s.get("user",{}).get("id")
+
+def cloud_pull_db():
+    token,uid=_cloud_headers()
+    if not token or not uid: return False
+    st.session_state["_cloud_loading"]=True
+    try:
+        url=f"{SUPABASE_URL}/rest/v1/chaplife_state?user_id=eq.{urllib.parse.quote(uid)}&select=db_blob,updated_at"
+        result=_http_json(url,token=token)
+        if result and result[0].get("db_blob"):
+            blob=base64.b64decode(result[0]["db_blob"].encode("ascii"))
+            tmp=DB_PATH.with_suffix(".cloudtmp")
+            tmp.write_bytes(blob)
+            # Validate downloaded DB before replacing local state.
+            conn=sqlite3.connect(tmp)
+            conn.execute("SELECT name FROM sqlite_master LIMIT 1").fetchone()
+            conn.close()
+            tmp.replace(DB_PATH)
+            init_db()
+            st.session_state["_cloud_last_sync"]=result[0].get("updated_at","")
+            return True
+        return False
+    finally:
+        st.session_state["_cloud_loading"]=False
+
+def cloud_push_db():
+    if st.session_state.get("_cloud_loading"): return False
+    token,uid=_cloud_headers()
+    if not token or not uid or not DB_PATH.exists(): return False
+    # Checkpoint database into a consistent file before encoding.
+    try:
+        c=db()
+        c.execute("PRAGMA wal_checkpoint(FULL)")
+        c.close()
+    except Exception:
+        pass
+    blob=base64.b64encode(DB_PATH.read_bytes()).decode("ascii")
+    payload={"user_id":uid,"db_blob":blob,"updated_at":datetime.utcnow().isoformat()+"Z"}
+    url=f"{SUPABASE_URL}/rest/v1/chaplife_state?on_conflict=user_id"
+    _http_json(url,"POST",payload,token,{"Prefer":"resolution=merge-duplicates,return=minimal"})
+    st.session_state["_cloud_last_sync"]="just now"
+    return True
+
+def _maybe_cloud_push():
+    # All existing ChapLife save/delete/update operations pass through set_setting/execute.
+    # Once signed in, those writes automatically persist the SQLite state to Supabase.
+    if not CLOUD_CONFIGURED: return
+    if not st.session_state.get("_chaplife_cloud_session"): return
+    if st.session_state.get("_cloud_loading"): return
+    try:
+        cloud_push_db()
+    except Exception as e:
+        st.session_state["_cloud_sync_error"]=str(e)
+
+def cloud_logout():
+    for k in ["_chaplife_cloud_session","_cloud_loaded","_cloud_last_sync","_cloud_sync_error"]:
+        st.session_state.pop(k,None)
+
+def cloud_auth_gate():
+    if not CLOUD_CONFIGURED:
+        st.error("ChapLife cloud sync is not configured yet. Add SUPABASE_URL and SUPABASE_PUBLISHABLE_KEY in Streamlit Secrets.")
+        st.stop()
+
+    if not st.session_state.get("_chaplife_cloud_session"):
+        st.markdown('<div class="hero"><h1>✨ ChapLife</h1><p>Private sign-in • one account • same data on phone and computer.</p></div>',unsafe_allow_html=True)
+        signin,create=st.tabs(["Sign in","Create my ChapLife account"])
+        with signin:
+            with st.form("cloud_signin"):
+                email=st.text_input("Email",key="cloud_email")
+                password=st.text_input("Password",type="password",key="cloud_password")
+                submit=st.form_submit_button("🔐 Sign in to ChapLife",use_container_width=True)
+                if submit:
+                    try:
+                        result=cloud_sign_in(email.strip(),password)
+                        if result.get("access_token"):
+                            st.session_state["_chaplife_cloud_session"]=result
+                            st.session_state["_cloud_loaded"]=False
+                            st.rerun()
+                        else:
+                            st.error("Sign-in did not return a session.")
+                    except Exception as e:
+                        st.error("Sign-in failed: "+str(e))
+        with create:
+            st.info("Use an email/password you want for ChapLife. This login protects your personal cloud data.")
+            with st.form("cloud_signup"):
+                email2=st.text_input("Email",key="cloud_signup_email")
+                pw1=st.text_input("Password",type="password",key="cloud_signup_pw1")
+                pw2=st.text_input("Confirm password",type="password",key="cloud_signup_pw2")
+                create_btn=st.form_submit_button("Create ChapLife account",use_container_width=True)
+                if create_btn:
+                    if len(pw1)<8:
+                        st.warning("Use at least 8 characters.")
+                    elif pw1!=pw2:
+                        st.warning("Passwords do not match.")
+                    else:
+                        try:
+                            result=cloud_sign_up(email2.strip(),pw1)
+                            if result.get("access_token"):
+                                st.session_state["_chaplife_cloud_session"]=result
+                                st.session_state["_cloud_loaded"]=False
+                                st.rerun()
+                            else:
+                                st.success("Account created. Supabase may require email confirmation. Check your email, confirm it, then use the Sign in tab.")
+                        except Exception as e:
+                            st.error("Account creation failed: "+str(e))
+        st.stop()
+
+    if not st.session_state.get("_cloud_loaded",False):
+        try:
+            found=cloud_pull_db()
+            if not found:
+                # First login for this user: claim the current local ChapLife state as the initial cloud copy.
+                cloud_push_db()
+            st.session_state["_cloud_loaded"]=True
+        except Exception as e:
+            st.error("ChapLife could not load your private cloud data: "+str(e))
+            st.caption("Make sure the one-time Supabase SQL setup has been run and your Streamlit Secrets are correct.")
+            if st.button("Sign out"):
+                cloud_logout(); st.rerun()
+            st.stop()
+
+cloud_auth_gate()
+
+# Small account/sync strip shown after sign-in.
+_cloud=_cloud_session()
+_user_email=(_cloud.get("user") or {}).get("email","")
+acct=st.columns([5,1,1])
+acct[0].caption(f"☁️ Private cloud sync active" + (f" · {_user_email}" if _user_email else ""))
+if acct[1].button("↕ Sync now",use_container_width=True,key="manual_cloud_sync"):
+    try:
+        cloud_push_db(); st.success("Synced.")
+    except Exception as e:
+        st.error("Sync failed: "+str(e))
+if acct[2].button("Sign out",use_container_width=True,key="cloud_signout"):
+    cloud_logout(); st.rerun()
+if st.session_state.get("_cloud_sync_error"):
+    st.warning("Cloud sync warning: "+st.session_state.pop("_cloud_sync_error"))
 
 # ---------- Helpers ----------
 def money(x):
@@ -3048,9 +3238,19 @@ def settings_page():
 
     with tabs[5]:
         st.subheader('Data & privacy')
-        st.write('ChapLife is currently hosted from GitHub, but personal data should live in a private cloud database—not in the public repository.')
+        st.success('☁️ Private Supabase sync is active for your signed-in ChapLife account.')
+        st.write('The app code remains on GitHub, while your ChapLife database is stored as private per-user cloud state protected by Supabase authentication and Row Level Security.')
         st.warning('Do not upload `chaplife.db`, financial exports, health screenshots, medicine-label photos, passwords, or API credentials to the public GitHub repository.')
-        st.info('The next sync step will move saved records to private cloud storage so phone and computer use the same data.')
+        st.caption(f"Last sync: {st.session_state.get('_cloud_last_sync','this session')}")
+        c=st.columns(2)
+        if c[0].button('☁️ Back up to cloud now',use_container_width=True,key='settings_cloud_push'):
+            try: cloud_push_db(); st.success('Cloud backup complete.')
+            except Exception as e: st.error(str(e))
+        if c[1].button('⬇ Reload from cloud',use_container_width=True,key='settings_cloud_pull'):
+            try:
+                if cloud_pull_db(): st.success('Cloud copy loaded.'); st.rerun()
+                else: st.info('No cloud copy found yet.')
+            except Exception as e: st.error(str(e))
 
 # ---------- Progress ----------
 def progress():
