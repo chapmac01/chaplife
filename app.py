@@ -1312,6 +1312,18 @@ sc('CRS-305','Crisis: Bad News Before Client Call','Crisis Day','Crisis','Ten mi
 ]
 
 
+
+def career_cleanup_duplicate_messages():
+    """One-time/self-healing cleanup for duplicate inbox rows created by older simulator builds."""
+    dupes=rows("""SELECT sender,subject,body,received_time,MIN(id) keep_id,COUNT(*) n
+                  FROM career_messages
+                  GROUP BY sender,subject,body,received_time
+                  HAVING COUNT(*)>1""")
+    for d in dupes:
+        execute("""DELETE FROM career_messages
+                   WHERE sender=? AND subject=? AND body=? AND received_time=? AND id<>?""",
+                (d["sender"],d["subject"],d["body"],d["received_time"],d["keep_id"]))
+
 def career_seed_day():
     """Seed incoming work as scheduled messages. A task appears when the request actually arrives."""
     state=sim_state()
@@ -1403,7 +1415,7 @@ TRAINING_GUIDES={
 "Project Email":{
 "what":"Project email creates a traceable record of requests, decisions, distribution, and follow-up.",
 "steps":["Use a specific subject.","Say why you are writing early.","Reference the project/document.","State the action needed and deadline.","CC only people who need action or visibility.","Verify attachments/revisions.","Follow up when a response is due."],
-"example":"Subject: FC-2417 — RFI-017 response needed today\nAvery, please review RFI-017 regarding conflicting receptacle mounting heights on A-402 and E-201. Electrical rough-in in Rooms 204–210 is affected. Please respond by 2:00 PM if possible so the field can proceed.",
+"example":"Example — inspection follow-up:\nTo: Inspection Agency\nCC: Dana Lewis · Superintendent\nSubject: FC-2417 — Framing inspection confirmation needed\nPlease confirm the framing inspection date/time for Fulton Commons. Drywall is scheduled tomorrow, so we need confirmation before 8:30 AM today to protect field sequencing.\n\nExample — RFI follow-up:\nTo: Avery Chen · Architect\nSubject: FC-2417 — RFI-017 response needed today\nPlease review RFI-017 regarding conflicting receptacle mounting heights on A-402 and E-201. Electrical rough-in in Rooms 204–210 is affected.",
 "mistakes":"Unclear requests, no deadline, unnecessary CCs, outdated attachments, or undocumented verbal decisions."
 },
 "Pay Application":{
@@ -1794,7 +1806,12 @@ def career_process_reaction_queue(state):
                     execute("DELETE FROM career_reaction_queue WHERE id=?",(q["id"],))
                     continue
 
-        key=f"AUTO_{q['id']}"
+        # Seeded morning requests have a canonical message key (M1, M2, ...).
+        # Using that same key prevents seed_day and the queue from both inserting the same email.
+        if rtype.startswith("Seed:"):
+            key=rtype.split(":",1)[1]
+        else:
+            key=f"AUTO_{q['id']}"
         if not rows("SELECT id FROM career_messages WHERE msg_key=?",(key,)):
             execute("INSERT INTO career_messages(msg_key,sender,subject,body,received_time) VALUES(?,?,?,?,?)",
                     (key,q["sender"],q["subject"],q["body"],_career_time_from_minutes(q["due_minute"])))
@@ -1975,7 +1992,12 @@ def reset_career_simulation():
             except: pass
 
 def career():
-    state=sim_state(); career_seed_day(); career_process_reaction_queue(state); career_reactions(state)
+    state=sim_state()
+    career_cleanup_duplicate_messages()
+    career_seed_day()
+    career_process_reaction_queue(state)
+    career_cleanup_duplicate_messages()
+    career_reactions(state)
     st.markdown(f"<div class='hero'><h1>🏗️ Northline Construction · Project Hub</h1><p><b>{state['project']}</b> · {state['project_no']} · {state['phase']} · Simulated Day {state['day']}</p></div>",unsafe_allow_html=True)
     top=st.columns(4); top[0].metric("Simulated time",sim_time(state)); top[1].metric("Unread",rows("SELECT COUNT(*) n FROM career_messages WHERE read=0")[0]["n"]); top[2].metric("Open tasks",rows("SELECT COUNT(*) n FROM career_tasks WHERE status!='Done'")[0]["n"]); top[3].metric("Mode",state["mode"])
     if state["paused"]:
@@ -2057,6 +2079,22 @@ def career():
                 execute("UPDATE career_messages SET read=1 WHERE id=?",(m["id"],))
                 st.write(m["body"])
         training_box("Project Email",state)
+
+        inspection_task=rows("SELECT * FROM career_tasks WHERE task_key='T1' AND status!='Done' LIMIT 1")
+        if inspection_task:
+            with st.container(border=True):
+                st.markdown("#### 🧭 Training help · Inspection confirmation")
+                st.write("Dana is asking you to **chase the framing inspection confirmation**. You are not confirming the inspection yourself — you need to contact the party that controls the inspection schedule.")
+                st.markdown("""
+1. Email **Inspection Agency**.
+2. Use a clear subject such as **FC-2417 — Framing inspection confirmation needed**.
+3. State that drywall is scheduled tomorrow and ask them to **confirm the inspection date/time**.
+4. Give the deadline: **before 8:30 AM today**.
+5. CC **Dana Lewis · Superintendent** because she needs the confirmation for field sequencing.
+6. Send it. The Inspection Agency should respond in simulated time; when the actual confirmation arrives, distribute it to the field team.
+""")
+                st.caption("You can use the example as guidance, but type/send the project email yourself in the Compose section below.")
+
         rfi_needed=rows("SELECT * FROM career_tasks WHERE task_key LIKE 'CREATE_RFI_%' AND status!='Done' ORDER BY id DESC LIMIT 1")
         if rfi_needed:
             with st.container(border=True):
