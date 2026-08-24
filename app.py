@@ -1311,12 +1311,58 @@ sc('CRS-304','Crisis: Subcontractor Walks Off','Crisis Day','Crisis','A major su
 sc('CRS-305','Crisis: Bad News Before Client Call','Crisis Day','Crisis','Ten minutes before a client call, you learn a key delivery will miss the promised date by two weeks.','Verify the facts, alert the PM, prepare impact/mitigation options, and communicate the issue directly without minimizing or speculating.','Clients need timely facts plus a recovery plan.','Say nothing unless the client asks.','Blame the vendor immediately.','Tell the client the old date is still good.'),
 ]
 
+
 def career_seed_day():
-    if rows("SELECT id FROM career_tasks LIMIT 1"): return
-    tasks=[("T1","Confirm framing inspection","Inspections","URGENT","Open","08:30","Drywall is scheduled tomorrow. Confirmation has not been received."),("T2","Route RFI-017: outlet mounting heights","RFIs","High","Open","09:15","Electrical is waiting on clarification between E-201 and A-402."),("T3","Prepare OAC meeting packet","Meetings","High","Open","09:45","Current RFI log, submittal log, procurement risks and 3-week look-ahead."),("T4","Review Apex Electric pay app","Cost","Medium","Open","12:00","Pay app requests 90%; field report indicates roughly 70% installed."),("T5","Follow up on door hardware submittal","Submittals","High","Open","11:00","Long-lead hardware approval is late and may affect turnover."),("T6","Update COI tracker","Compliance","Medium","Open","15:00","Metro Interiors COI expires Friday.")]
-    for x in tasks: execute("INSERT OR IGNORE INTO career_tasks(task_key,title,area,priority,status,due_time,detail) VALUES(?,?,?,?,?,?,?)",x)
-    msgs=[("M1","Dana Lewis · Superintendent","Inspection confirmation needed","Morning — I still do not have confirmation for the framing inspection. Drywall is supposed to start tomorrow. Can you chase this before 8:30?","07:34"),("M2","Marcus Reed · Project Manager","OAC packet before 10 AM","Please send me the current RFI/submittal logs and top procurement risks before the owner meeting. Flag anything you are not confident is current.","07:41"),("M3","Apex Electric · PM","RFI 017 holding Rooms 204–210","We have two different outlet heights in the documents. Crew is moving to another area, but we need direction today.","07:46"),("M4","Accounting","Pay application cutoff today","Apex Electric pay application must be approved or returned by 3:00 PM to make this cycle.","07:52"),("M5","Door Hardware Vendor","RE: Hardware package","Factory slot may be lost if approved submittal is not released this week. Current quoted lead time is 10–12 weeks.","08:03")]
-    for x in msgs: execute("INSERT OR IGNORE INTO career_messages(msg_key,sender,subject,body,received_time) VALUES(?,?,?,?,?)",x)
+    # Seed the work queue immediately, but release inbox messages only when simulated time reaches them.
+    tasks=[
+        ("T1","Confirm framing inspection","Inspections","URGENT","Open","08:30","Drywall is scheduled tomorrow. Confirmation has not been received."),
+        ("T2","Route RFI-017: outlet mounting heights","RFIs","High","Open","09:15","Electrical is waiting on clarification between E-201 and A-402."),
+        ("T3","Prepare OAC meeting packet","Meetings","High","Open","09:45","Current RFI log, submittal log, procurement risks and 3-week look-ahead."),
+        ("T4","Review Apex Electric pay app","Cost","Medium","Open","12:00","Pay app requests 90%; field report indicates roughly 70% installed."),
+        ("T5","Follow up on door hardware submittal","Submittals","High","Open","11:00","Long-lead hardware approval is late and may affect turnover."),
+        ("T6","Update COI tracker","Compliance","Medium","Open","15:00","Metro Interiors COI expires Friday.")
+    ]
+    for x in tasks:
+        execute("INSERT OR IGNORE INTO career_tasks(task_key,title,area,priority,status,due_time,detail) VALUES(?,?,?,?,?,?,?)",x)
+
+    state=sim_state()
+    now=int(state["minutes"])
+    seeded=[
+        ("M1",454,"Dana Lewis · Superintendent","Inspection confirmation needed",
+         "Morning — I still do not have confirmation for the framing inspection. Drywall is supposed to start tomorrow. Can you chase this before 8:30?"),
+        ("M2",461,"Marcus Reed · Project Manager","OAC packet before 10 AM",
+         "Please send me the current RFI/submittal logs and top procurement risks before the owner meeting. Flag anything you are not confident is current."),
+        ("M3",466,"Apex Electric · PM","RFI 017 holding Rooms 204–210",
+         "We have two different outlet heights in the documents. Crew is moving to another area, but we need direction today."),
+        ("M4",472,"Accounting","Pay application cutoff today",
+         "Apex Electric pay application must be approved or returned by 3:00 PM to make this cycle."),
+        ("M5",483,"Door Hardware Vendor","RE: Hardware package",
+         "Factory slot may be lost if approved submittal is not released this week. Current quoted lead time is 10–12 weeks.")
+    ]
+
+    for key,at,sender,subject,body in seeded:
+        # Migration fix for old builds: remove a seeded message if it was exposed before its simulated timestamp.
+        existing=rows("SELECT id FROM career_messages WHERE msg_key=?",(key,))
+        if existing and now < at:
+            execute("DELETE FROM career_messages WHERE msg_key=?",(key,))
+            existing=[]
+
+        if now >= at:
+            # Once the simulated clock reaches the timestamp, place it in the inbox.
+            if not existing:
+                execute("INSERT OR IGNORE INTO career_messages(msg_key,sender,subject,body,received_time) VALUES(?,?,?,?,?)",
+                        (key,sender,subject,body,_career_time_from_minutes(at)))
+                career_activity(state,"Incoming",subject,body)
+        else:
+            # Future messages live only in the reaction queue until their time arrives.
+            rtype="Seed:"+key
+            queued=rows("SELECT id FROM career_reaction_queue WHERE reaction_type=?",(rtype,))
+            if not queued:
+                execute("""INSERT INTO career_reaction_queue(
+                    source_sent_id,due_minute,sender,subject,body,reaction_type,
+                    task_key,task_title,task_area,task_priority,task_due_time,task_detail
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (None,at,sender,subject,body,rtype,None,None,None,None,None,None))
 
 def sim_state():
     state=get_setting("career_workday",None)
@@ -1385,6 +1431,19 @@ def training_box(topic,state):
 def career_activity(state,kind,title,detail=""):
     execute("INSERT INTO career_activity(activity_time,activity_type,title,detail) VALUES(?,?,?,?)",(sim_time(state),kind,title,detail))
 
+
+
+def _career_clock_to_minutes(label):
+    try:
+        dt=datetime.strptime(label.strip(),"%I:%M %p")
+        return dt.hour*60+dt.minute
+    except:
+        # Legacy seeded rows used 24-hour strings such as 07:34.
+        try:
+            h,m=label.strip().split(":")[:2]
+            return int(h)*60+int(m)
+        except:
+            return 0
 
 def _career_time_from_minutes(mins):
     h=mins//60; m=mins%60
@@ -1565,8 +1624,102 @@ def career_reactions(state):
             execute("INSERT INTO career_messages(msg_key,sender,subject,body,received_time) VALUES(?,?,?,?,?)",(key,sender,subject,body,sim_time({"minutes":at})))
             career_activity(state,"Incoming",subject,body)
 
+
+def career_queue_message(state,delay,sender,subject,body,reaction_type="Project Reaction",
+                         task_key=None,task_title=None,task_area=None,task_priority=None,task_due_time=None,task_detail=None):
+    _queue_reaction(
+        None,int(state["minutes"])+delay,sender,subject,body,reaction_type,
+        task_key,task_title,task_area,task_priority,task_due_time,task_detail
+    )
+
+def career_has_evidence(task_key):
+    """Check the simulator records that should exist before selected tasks are truly complete."""
+    if task_key=="T2":
+        return bool(rows("SELECT id FROM career_rfis"))
+    if task_key=="T4":
+        return bool(rows("SELECT id FROM career_activity WHERE activity_type='Cost Review'"))
+    if task_key=="T3":
+        return bool(rows("SELECT id FROM career_sent WHERE lower(subject) LIKE '%oac%' OR lower(body) LIKE '%oac%'"))
+    if task_key=="T1":
+        return bool(rows("SELECT id FROM career_sent WHERE lower(subject) LIKE '%inspection%' OR lower(body) LIKE '%inspection%'"))
+    if task_key=="T5":
+        return bool(rows("SELECT id FROM career_sent WHERE lower(subject) LIKE '%hardware%' OR lower(body) LIKE '%hardware%' OR lower(body) LIKE '%submittal%'"))
+    if task_key=="T6":
+        return bool(rows("SELECT id FROM career_sent WHERE lower(subject) LIKE '%coi%' OR lower(body) LIKE '%insurance%' OR lower(body) LIKE '%certificate%'"))
+    return True
+
+def career_task_status_reaction(state,t,old_status,new_status):
+    key=t["task_key"]; title=t["title"]
+    career_activity(state,"Task Status",f"{title}: {old_status} → {new_status}",f"Priority {t['priority']} · Due {t['due_time']}")
+
+    if new_status=="In Progress":
+        if t["priority"]=="URGENT":
+            career_queue_message(state,7,"Marcus Reed · Project Manager","Status check — "+title,
+                                 "I see you picked this up. What is the blocker, who owns the next response, and when should I expect an update?",
+                                 "PM Status Check")
+        elif key=="T4":
+            career_queue_message(state,9,"Jasmine Cole · Accounting","Apex pay app timing",
+                                 "Thanks for picking this up. Reminder: I need a supported amount before the payment-run cutoff.",
+                                 "Deadline Reminder")
+        else:
+            career_queue_message(state,12,"Marcus Reed · Project Manager","RE: "+title,
+                                 "Thanks. Keep the task status current and document the outcome when you close it.",
+                                 "PM Coaching")
+
+    elif new_status=="Waiting":
+        # Waiting without communication is not enough.
+        related=rows("SELECT id FROM career_sent WHERE sent_time>=? ORDER BY id DESC LIMIT 1",(sim_time(state),))
+        career_queue_message(state,10,"Marcus Reed · Project Manager","Waiting status — "+title,
+                             "Who are we waiting on, when did you contact them, and when are you following up? 'Waiting' still needs an owner and a next-action time.",
+                             "Waiting Follow-up",
+                             task_key=f"WAITFOLLOW_{key}_{state['minutes']}",task_title="Set follow-up for "+title,
+                             task_area=t["area"],task_priority="High",task_due_time=_career_time_from_minutes(int(state["minutes"])+30),
+                             task_detail="Document who owns the response and perform a follow-up if it has not arrived.")
+
+    elif new_status=="Done":
+        if not career_has_evidence(key):
+            # Reject false completion and reopen.
+            execute("UPDATE career_tasks SET status='In Progress',completed_at=NULL WHERE id=?",(t["id"],))
+            career_queue_message(state,2,"Marcus Reed · Project Manager","Task reopened — "+title,
+                                 "I saw this was marked Done, but I can’t find the supporting project action/documentation. I reopened it. Complete the actual work, then close the task.",
+                                 "Completion Rejected")
+            career_activity(state,"Quality Control",title+" reopened","Marked Done without required supporting evidence.")
+            return "reopened"
+
+        if key=="T2":
+            career_queue_message(state,5,"Dana Lewis · Superintendent","RFI routed — field needs the response",
+                                 "Thanks. I see the RFI is out. Keep me posted when design answers; electrical is still working around the affected rooms.",
+                                 "Field Reaction")
+        elif key=="T4":
+            career_queue_message(state,4,"Jasmine Cole · Accounting","Apex review received",
+                                 "I see the cost review is complete. I’ll keep the disputed amount on hold until the approved backup/correction is documented.",
+                                 "Accounting Reaction")
+        elif key=="T3":
+            career_queue_message(state,5,"Marcus Reed · Project Manager","OAC packet received",
+                                 "Got it. I’m reviewing the packet now. If any log is stale, flag it before the meeting rather than letting the owner discover it.",
+                                 "PM Review")
+        elif key=="T1":
+            career_queue_message(state,4,"Dana Lewis · Superintendent","Inspection follow-up",
+                                 "Thanks for chasing it. I still need the actual confirmation before I release tomorrow’s drywall sequence.",
+                                 "Field Follow-up")
+        elif key=="T5":
+            career_queue_message(state,8,"Door Hardware Vendor","RE: Hardware package",
+                                 "Thanks for the follow-up. The factory slot is still being held temporarily. We need the approved release this week to protect the quoted lead time.",
+                                 "Vendor Reaction")
+        else:
+            career_queue_message(state,8,"Marcus Reed · Project Manager","Completed — "+title,
+                                 "I see this closed. Make sure the final record is filed where the team can find it.",
+                                 "Completion Acknowledgment")
+
+    elif new_status=="Open" and old_status in ("In Progress","Waiting"):
+        career_queue_message(state,10,"Marcus Reed · Project Manager","Task moved back to Open — "+title,
+                             "I noticed this moved back to Open. Add a note or communicate the reason if the priority, owner, or plan changed.",
+                             "Status Regression")
+
+    return "ok"
+
 def career():
-    career_seed_day(); state=sim_state(); career_process_reaction_queue(state); career_reactions(state)
+    state=sim_state(); career_seed_day(); career_process_reaction_queue(state); career_reactions(state)
     st.markdown(f"<div class='hero'><h1>🏗️ Northline Construction · Project Hub</h1><p><b>{state['project']}</b> · {state['project_no']} · {state['phase']} · Simulated Day {state['day']}</p></div>",unsafe_allow_html=True)
     top=st.columns(4); top[0].metric("Simulated time",sim_time(state)); top[1].metric("Unread",rows("SELECT COUNT(*) n FROM career_messages WHERE read=0")[0]["n"]); top[2].metric("Open tasks",rows("SELECT COUNT(*) n FROM career_tasks WHERE status!='Done'")[0]["n"]); top[3].metric("Mode",state["mode"])
     if state["paused"]:
@@ -1609,8 +1762,16 @@ def career():
         st.subheader("Project Inbox")
         pending=rows("SELECT * FROM career_reaction_queue ORDER BY due_minute,id")
         if pending:
-            st.caption(f"Project activity is live • {len(pending)} response/follow-up event{'s' if len(pending)!=1 else ''} currently developing in simulated time.")
-        for m in rows("SELECT * FROM career_messages ORDER BY id DESC"):
+            st.caption(f"Project activity is live • {len(pending)} future response/follow-up event{'s' if len(pending)!=1 else ''} are scheduled but will stay hidden until simulated time reaches them.")
+        else:
+            st.caption("Only messages that have actually arrived by the current simulated time appear here.")
+        visible_messages=[
+            m for m in rows("SELECT * FROM career_messages ORDER BY id DESC")
+            if _career_clock_to_minutes(m["received_time"]) <= int(state["minutes"])
+        ]
+        if not visible_messages:
+            st.info(f"No messages have arrived yet at {sim_time(state)}. Incoming email will populate as simulated time moves.")
+        for m in visible_messages:
             icon="●" if not m["read"] else "○"
             with st.expander(f"{icon} {m['received_time']} · {m['sender']} — {m['subject']}"):
                 execute("UPDATE career_messages SET read=1 WHERE id=?",(m["id"],))
@@ -1643,7 +1804,17 @@ def career():
         for t in rows("SELECT * FROM career_tasks ORDER BY due_time"):
             with st.container(border=True):
                 a,b=st.columns([5,1]); a.markdown(f"**{t['title']}** · {t['area']} · {t['priority']} · Due {t['due_time']} — {t['detail']}"); opts=["Open","In Progress","Waiting","Done"]; new=b.selectbox("Status",opts,index=opts.index(t["status"]),key="stat_"+t["task_key"],label_visibility="collapsed")
-                if new!=t["status"]: execute("UPDATE career_tasks SET status=?,completed_at=? WHERE id=?",(new,sim_time(state) if new=="Done" else None,t["id"])); advance_sim(state,6); st.rerun()
+                if new!=t["status"]:
+                    old_status=t["status"]
+                    execute("UPDATE career_tasks SET status=?,completed_at=? WHERE id=?",(new,sim_time(state) if new=="Done" else None,t["id"]))
+                    outcome=career_task_status_reaction(state,t,old_status,new)
+                    advance_sim(state,6)
+                    career_reactions(state)
+                    if outcome=="reopened":
+                        st.session_state["task_reaction_notice"]="⚠️ The task was reopened because the simulator could not find the work required to support completion."
+                    st.rerun()
+        if st.session_state.get("task_reaction_notice"):
+            st.warning(st.session_state.pop("task_reaction_notice"))
     with tabs[3]:
         st.subheader("RFI Desk")
         training_box("RFI",state)
@@ -1671,6 +1842,15 @@ def career():
                     execute("UPDATE career_rfis SET response=? WHERE rfi_no=?",('Avery acknowledged receipt. Design response pending.',num))
                     career_activity(state,"RFI Response",num+" acknowledged","Avery Chen confirmed receipt; response pending.")
                     st.session_state["rfi_ok"]=f"✅ {num} SUBMITTED at {sim_time(state)}. It is saved in the RFI Log and Avery acknowledged it."
+                    career_queue_message(state,12,"Avery Chen · Architect","Design review — "+num,
+                                         'I reviewed the conflict. Use 18" AFF in Rooms 204–210. Please distribute this clarification to the field and update the RFI log.',
+                                         "RFI Answer",
+                                         task_key=f"DISTRIBUTE_{num}",task_title=f"Distribute {num} response to field",
+                                         task_area="RFIs",task_priority="URGENT",task_due_time=_career_time_from_minutes(int(state["minutes"])+25),
+                                         task_detail="Send the architect clarification to Dana/Apex and record the response.")
+                    career_queue_message(state,20,"Dana Lewis · Superintendent",num+" field follow-up",
+                                         "Did design answer yet? I need documented direction before I put electrical back into those rooms.",
+                                         "Field Pressure")
                 career_reactions(state)
         if st.session_state.get("rfi_ok"): st.success(st.session_state.pop("rfi_ok"))
         st.markdown("#### RFI Log")
@@ -1693,10 +1873,26 @@ def career():
                 if decision in ["Hold for verification","Return for correction"]:
                     msg="Marcus: Good catch. Accounting will hold the affected billing until Apex supports or corrects the percentage."
                     career_activity(state,"Cost Review","Apex Pay App review accepted",msg)
+                    execute("UPDATE career_tasks SET status='Done',completed_at=? WHERE task_key='T4'",(sim_time(state),))
+                    career_queue_message(state,4,"Jasmine Cole · Accounting","Apex pay app placed on hold",
+                                         "Hold is in place. Please send the supported/revised amount before 2:30 PM if the undisputed portion should make today's run.",
+                                         "Accounting Reaction",
+                                         task_key=f"PAYBACKUP_{state['minutes']}",task_title="Obtain Apex billing backup / correction",
+                                         task_area="Cost",task_priority="High",task_due_time="2:30 PM",
+                                         task_detail="Get supporting backup or corrected billing and document the approved amount.")
+                    career_queue_message(state,11,"Luis Ortega · Apex Electric PM","RE: Pay application hold",
+                                         "We disagree with holding the full amount. Material is onsite and rough-in is substantially complete in released areas. I can send invoices and a progress markup.",
+                                         "Trade Pushback")
                     st.session_state["cost_ok"]="✅ REVIEW SUBMITTED. "+msg
                 else:
                     msg="Marcus returned your review. Field progress does not support the billed percentage; verify before approval."
                     career_activity(state,"Cost Review","Apex Pay App returned for revision",msg)
+                    career_queue_message(state,3,"Marcus Reed · Project Manager","Pay app review needs correction",
+                                         "Do not approve unsupported billing. Compare the schedule of values to verified field progress and backup, then resubmit your recommendation.",
+                                         "PM Correction",
+                                         task_key=f"REDOCOST_{state['minutes']}",task_title="Redo Apex pay-app review",
+                                         task_area="Cost",task_priority="URGENT",task_due_time="12:30 PM",
+                                         task_detail="Verify installed/stored work and submit a supported recommendation.")
                     st.session_state["cost_ok"]="⚠️ REVIEW SUBMITTED, THEN RETURNED. "+msg
                 career_reactions(state)
         if st.session_state.get("cost_ok"): st.success(st.session_state.pop("cost_ok"))
@@ -1733,7 +1929,27 @@ def career():
         st.subheader("Scenario Lab · Escalating Pressure"); c=st.columns(3); mode2=c[0].selectbox("Mode",["Learn","Practice","Job"],key="career_mode2"); level=c[1].selectbox("Difficulty",["Beginner","Intermediate","Advanced","Crisis","Any"],key="career_level2"); skill=c[2].selectbox("Skill",["Any"]+sorted(set(x["skill"] for x in SCENARIOS)),key="career_skill2"); pool=[x for x in SCENARIOS if (level=="Any" or x["level"]==level) and (skill=="Any" or x["skill"]==skill)] or SCENARIOS
         if st.button("🎲 Load scenario",use_container_width=True): st.session_state.career_scenario=random.choice(pool)["id"]; st.rerun()
         sid=st.session_state.get("career_scenario",pool[0]["id"]); scn=next((x for x in pool if x["id"]==sid),pool[0]); st.markdown(f"### {scn['title']} · {scn['level']}"); st.write(scn["prompt"]); choices=list(scn["choices"]); random.Random(scn["id"]+str(state["day"])).shuffle(choices); choice=st.radio("Decision",choices,key="choice_"+scn["id"]); other=st.text_area("What else would you do?",key="other_"+scn["id"])
-        if st.button("Submit decision",use_container_width=True): score=scn["choices"][choice]; execute("INSERT INTO career_log(log_date,scenario_id,mode,choice,score,skill,note) VALUES(?,?,?,?,?,?,?)",(date.today().isoformat(),scn["id"],mode2,choice,score,scn["skill"],other)); st.session_state["result_"+scn["id"]]=score
+        if st.button("Submit decision",use_container_width=True):
+            score=scn["choices"][choice]
+            execute("INSERT INTO career_log(log_date,scenario_id,mode,choice,score,skill,note) VALUES(?,?,?,?,?,?,?)",(date.today().isoformat(),scn["id"],mode2,choice,score,scn["skill"],other))
+            career_activity(state,"Scenario Decision",scn["title"],f"Decision: {choice} · Score {score}")
+            if score>=9:
+                career_queue_message(state,8,"Marcus Reed · Project Manager","RE: "+scn["title"],
+                                     "Good call. That protects the project and gives the team a documented next step. Keep the follow-up moving.",
+                                     "Positive Feedback")
+            elif score>=4:
+                career_queue_message(state,6,"Marcus Reed · Project Manager","Follow-up — "+scn["title"],
+                                     "Your response is workable, but there is still exposure. Tighten the documentation, ownership, and follow-up time before this drifts.",
+                                     "Coaching")
+            else:
+                career_queue_message(state,4,"Marcus Reed · Project Manager","Escalation — "+scn["title"],
+                                     "This created project risk. Stop and correct the action before the issue affects cost, schedule, or the field.",
+                                     "Escalation",
+                                     task_key=f"CORRECT_{scn['id']}_{state['minutes']}",task_title="Correct scenario decision: "+scn["title"],
+                                     task_area=scn["skill"],task_priority="URGENT",task_due_time=_career_time_from_minutes(int(state["minutes"])+25),
+                                     task_detail="Review the experienced coordinator response and take a corrective project-control action.")
+            advance_sim(state,8)
+            st.session_state["result_"+scn["id"]]=score
         if "result_"+scn["id"] in st.session_state:
             score=st.session_state["result_"+scn["id"]]; st.success("Strong coordinator decision.") if score>=9 else st.warning("There is a stronger project-control response.") if score>=4 else st.error("This creates significant project risk."); st.write("**Experienced coordinator response:** "+scn["best"]); st.write(scn["why"])
     with tabs[9]:
