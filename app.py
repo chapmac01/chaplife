@@ -1383,7 +1383,7 @@ def advance_sim(state,mins=10):
 
 TRAINING_GUIDES={
 "RFI":{
-"what":"An RFI (Request for Information) formally asks the design team to clarify missing, conflicting, or unclear contract information.",
+"what":"An RFI (Request for Information) formally asks the design team to clarify missing, conflicting, or unclear contract information. An email can alert someone to the issue, but if the field needs formal design direction, the clarification should be captured in the RFI record.",
 "steps":["Check the latest drawing/spec revision first.","Use a short, searchable subject.","Reference the exact drawing/detail/spec and location.","Describe the conflict factually.","Ask one clear question; do not guess the design answer.","Route it to the proper design contact and copy the PM/Superintendent as required.","Log the response and distribute the clarification to the field."],
 "example":'Subject: Receptacle mounting height — Rooms 204–210\nReferences: A-402 Interior Elevation 2 / E-201 Detail 3\nQuestion: A-402 indicates receptacles at 18" AFF while E-201 indicates 24" AFF in Rooms 204–210. Please confirm the required mounting height.',
 "mistakes":"Vague questions, no drawing reference, multiple unrelated issues in one RFI, blame language, or telling the trade to guess."
@@ -1468,12 +1468,136 @@ def _queue_reaction(source_sent_id,due_minute,sender,subject,body,reaction_type=
     (source_sent_id,due_minute,sender,subject,body,reaction_type,
      task_key,task_title,task_area,task_priority,task_due_time,task_detail))
 
+
+def career_role_redirect(recipient,subject,body):
+    """Return a realistic redirect when the recipient is clearly outside the role needed for the request."""
+    txt=(subject+" "+body).lower()
+
+    # Strong intent signals only; ambiguous messages are allowed to play out naturally.
+    design_request=(
+        any(x in txt for x in ["clarify","clarification","confirm the required","design response","drawing conflict","conflicting drawing","rfi response"])
+        and any(x in txt for x in ["drawing","rfi","a-","e-","spec","detail","receptacle","outlet"])
+    )
+    accounting_request=any(x in txt for x in ["payment run","pay application","pay app","invoice","billing","payment cutoff","process payment"])
+    field_request=any(x in txt for x in ["field verify","verify in field","crew","framing inspection","rough-in","site condition","field condition","inspection confirmation"])
+    hardware_request=any(x in txt for x in ["door hardware","hardware package","hardware submittal","factory slot"])
+    coi_request=any(x in txt for x in ["coi","certificate of insurance","insurance certificate"])
+    owner_request=any(x in txt for x in ["owner decision","owner approval","owner selection","owner change","client decision"])
+    electrical_trade_request=any(x in txt for x in ["apex","electrical crew","electrical material","electrician","stored material"]) and not design_request
+
+    # Marcus is a legitimate escalation/oversight path for almost everything, so don't flag PM mail as "wrong."
+    if "Marcus Reed" in recipient:
+        return None
+
+    if design_request and "Avery Chen" not in recipient:
+        return {
+            "correct":"Avery Chen · Architect",
+            "reason":"Design clarifications, drawing/spec conflicts, and formal RFI responses belong with the design team.",
+            "copy":"Copy Marcus Reed (PM) and Dana Lewis (Superintendent) when the answer affects cost, schedule, or field work."
+        }
+
+    if accounting_request:
+        # Asking the trade for backup is valid; asking PM for approval is valid. Obvious outsiders get redirected.
+        if not any(x in recipient for x in ["Accounting","Marcus Reed","Apex Electric"]):
+            return {
+                "correct":"Jasmine Cole · Accounting / Marcus Reed · Project Manager",
+                "reason":"Payment processing belongs with Accounting, while the PM owns project approval/authorization. If backup is missing, request it from Apex Electric.",
+                "copy":"For a disputed pay app, keep Accounting, Marcus, and the affected subcontractor aligned."
+            }
+
+    if field_request and not any(x in recipient for x in ["Dana Lewis","Inspection Agency","Apex Electric"]):
+        return {
+            "correct":"Dana Lewis · Superintendent",
+            "reason":"Field verification, crew sequencing, and site/inspection coordination are led from the field by the Superintendent.",
+            "copy":"If an outside inspection confirmation is required, coordinate with the Inspection Agency and keep Dana copied."
+        }
+
+    if hardware_request and "Door Hardware Vendor" not in recipient:
+        return {
+            "correct":"Door Hardware Vendor",
+            "reason":"Hardware lead time, factory slots, and vendor package status need to come from the hardware vendor.",
+            "copy":"Copy Marcus if the lead time creates a schedule or turnover risk."
+        }
+
+    if coi_request and "Metro Interiors" not in recipient and "Accounting" not in recipient:
+        return {
+            "correct":"Metro Interiors",
+            "reason":"The subcontractor/vendor must provide its current Certificate of Insurance. The project team tracks it but cannot issue it for them.",
+            "copy":"Copy Accounting/project administration if they maintain the compliance record."
+        }
+
+    if owner_request and "Nia Brooks" not in recipient:
+        return {
+            "correct":"Nia Brooks · Owner Representative",
+            "reason":"Owner selections, owner approvals, and client decisions need to come from the Owner Representative.",
+            "copy":"Keep Marcus Reed copied so the PM can track cost/schedule consequences."
+        }
+
+    if electrical_trade_request and "Apex Electric" not in recipient:
+        # If it is clearly a design clarification, design_request above wins.
+        return {
+            "correct":"Luis Ortega · Apex Electric PM",
+            "reason":"Questions about Apex's manpower, electrical material, stored-material backup, or trade execution belong with the electrical subcontractor.",
+            "copy":"Copy Dana for field coordination and Marcus for cost/schedule impact when appropriate."
+        }
+
+    return None
+
 def career_schedule_email_reactions(state,sent_id,recipient,cc,subject,body):
     """Create realistic delayed reactions to an outgoing project email."""
     now=int(state["minutes"])
     txt=(subject+" "+body).lower()
     cc_txt=(cc or "").lower()
     quality=_email_quality(subject,body)
+
+    # Process-awareness training: sometimes the recipient is correct, but email is the wrong formal process.
+    # A drawing/spec conflict that requires documented design direction should be routed as an RFI.
+    formal_design_issue=(
+        any(x in txt for x in ["drawing conflict","conflicting drawing","conflicting drawings","spec conflict","clarification","confirm the required","which height","which dimension","design direction"])
+        and any(x in txt for x in ["drawing","a-","e-","spec","detail","receptacle","outlet","dimension","rooms"])
+    )
+    looks_like_rfi_request=("rfi" not in txt or "submit rfi" not in txt) and formal_design_issue
+
+    if "Avery Chen" in recipient and looks_like_rfi_request:
+        reply=(
+            "I can help with the design question, but this needs to be documented as a formal RFI rather than handled only by email. "
+            "Please submit an RFI with the exact drawing/spec references, affected location, the conflict you found, and one clear question. "
+            "Once it is routed, I can issue the design response against the RFI record."
+        )
+        if state.get("mode")=="Training":
+            reply += " Training note: email can alert the architect that an issue exists, but the RFI creates the formal project record the field can rely on."
+        _queue_reaction(
+            sent_id,now+3,"Avery Chen · Architect","RE: "+(subject or "Design clarification"),reply,
+            "Wrong Process",
+            task_key=f"CREATE_RFI_{sent_id}",task_title="Create formal RFI for design clarification",
+            task_area="RFIs",task_priority="URGENT",task_due_time=_career_time_from_minutes(now+20),
+            task_detail="Your email reached the correct person, but the issue requires a formal RFI. Open the RFI Desk, reference the exact drawings/specs, describe the conflict, and ask one clear question."
+        )
+        career_activity(state,"Training","Email should have been an RFI","Correct recipient, wrong project-control process.")
+        return
+
+    # Role-awareness training: clearly misrouted emails are returned by the person you contacted.
+    redirect=career_role_redirect(recipient,subject,body)
+    if redirect:
+        training_extra=""
+        if state.get("mode")=="Training":
+            training_extra=" Training note: "+redirect["reason"]+" "+redirect["copy"]
+        reply=(
+            "Hi — this one isn’t really in my lane. "
+            +redirect["reason"]+
+            " Please send this to **"+redirect["correct"]+"** instead. "
+            +redirect["copy"]+
+            training_extra
+        )
+        _queue_reaction(
+            sent_id,now+3,recipient,"RE: "+(subject or "Your message"),reply,
+            "Wrong Recipient",
+            task_key=f"REROUTE_{sent_id}",task_title="Reroute email to the correct project contact",
+            task_area="Communication",task_priority="High",task_due_time=_career_time_from_minutes(now+18),
+            task_detail="Your original email was sent to the wrong role. Review the recipient's explanation, resend it to "+redirect["correct"]+", and use the CC guidance provided."
+        )
+        career_activity(state,"Training","Email routed to wrong role",f"{recipient} will redirect you to {redirect['correct']}.")
+        return
 
     # Poor/unclear project email: recipient asks for clarification instead of magically knowing.
     if quality<=2:
@@ -1570,6 +1694,52 @@ def career_schedule_email_reactions(state,sent_id,recipient,cc,subject,body):
             _queue_reaction(sent_id,now+8,"Luis Ortega · Apex Electric PM","RE: "+subject,
                             "Received. I’ll check with the foreman and get back to you.",
                             "Acknowledgment")
+
+    elif "Door Hardware Vendor" in recipient:
+        if any(x in txt for x in ["hardware","submittal","factory","lead time"]):
+            _queue_reaction(sent_id,now+6,"Door Hardware Vendor","RE: "+subject,
+                            "Thanks for checking in. The factory slot is still being held, but we need the approved hardware release this week to protect the current lead time.",
+                            "Vendor Response")
+        else:
+            _queue_reaction(sent_id,now+5,"Door Hardware Vendor","RE: "+subject,
+                            "I’m the hardware vendor, so I can help with the hardware package, fabrication, and lead-time questions. This request looks like it belongs with the project team or another trade.",
+                            "Role Clarification")
+
+    elif "Metro Interiors" in recipient:
+        if any(x in txt for x in ["coi","insurance","drywall","interiors"]):
+            _queue_reaction(sent_id,now+6,"Metro Interiors","RE: "+subject,
+                            "Received. I’ll have our office send the current COI and confirm the drywall coordination item.",
+                            "Subcontractor Response")
+        else:
+            _queue_reaction(sent_id,now+5,"Metro Interiors","RE: "+subject,
+                            "This doesn’t appear to involve our interiors scope. Please check the responsible trade/project contact.",
+                            "Role Clarification")
+
+    elif "Inspection Agency" in recipient:
+        if "inspection" in txt:
+            _queue_reaction(sent_id,now+7,"Inspection Agency","RE: "+subject,
+                            "We have the request. I’m checking the inspector schedule and will send confirmation once the slot is assigned.",
+                            "Inspection Response")
+            _queue_reaction(sent_id,now+18,"Inspection Agency","Framing inspection confirmed",
+                            "Framing inspection is confirmed for 8:00 AM tomorrow. Please ensure the area is accessible and ready before the inspector arrives.",
+                            "Inspection Confirmation",
+                            task_key=f"INSPECTDIST_{sent_id}",task_title="Distribute framing inspection confirmation",
+                            task_area="Inspections",task_priority="High",task_due_time=_career_time_from_minutes(now+28),
+                            task_detail="Send the confirmed inspection time to Dana and the affected field team.")
+        else:
+            _queue_reaction(sent_id,now+5,"Inspection Agency","RE: "+subject,
+                            "We only handle inspection scheduling/confirmation. This request should go back to the appropriate project team member.",
+                            "Role Clarification")
+
+    elif "Nia Brooks" in recipient:
+        if any(x in txt for x in ["owner","selection","approval","decision","change"]):
+            _queue_reaction(sent_id,now+10,"Nia Brooks · Owner Representative","RE: "+subject,
+                            "Thanks. I’m reviewing this from the owner side. Please make sure Marcus is included on any cost or schedule impact before I confirm the decision.",
+                            "Owner Response")
+        else:
+            _queue_reaction(sent_id,now+7,"Nia Brooks · Owner Representative","RE: "+subject,
+                            "I represent the owner, so I’m usually the right contact for owner decisions and approvals. This looks more like contractor/design coordination; please route it through Marcus or the responsible project contact.",
+                            "Role Clarification")
 
     # Accounting behavior: process/backup focused.
     elif "Accounting" in recipient:
@@ -1816,10 +1986,38 @@ def career():
                 execute("UPDATE career_messages SET read=1 WHERE id=?",(m["id"],))
                 st.write(m["body"])
         training_box("Project Email",state)
+        rfi_needed=rows("SELECT * FROM career_tasks WHERE task_key LIKE 'CREATE_RFI_%' AND status!='Done' ORDER BY id DESC LIMIT 1")
+        if rfi_needed:
+            with st.container(border=True):
+                st.warning("📄 A formal RFI is required for your current design question.")
+                st.write(rfi_needed[0]["detail"])
+                if st.button("Open RFI Desk →",use_container_width=True,key="jump_to_rfi_from_email"):
+                    st.session_state["career_jump_rfi"]=True
+                    st.info("Use the **RFI Desk** tab above to complete the formal request.")
         st.markdown("#### Compose / reply")
         with st.form("career_compose",clear_on_submit=True):
-            recipient=st.selectbox("To",["Marcus Reed · Project Manager","Dana Lewis · Superintendent","Avery Chen · Architect","Apex Electric","Accounting"])
-            cc=st.multiselect("CC",["Marcus Reed · Project Manager","Dana Lewis · Superintendent","Avery Chen · Architect","Owner Rep","Accounting"])
+            recipient=st.selectbox("To",[
+                "Marcus Reed · Project Manager",
+                "Dana Lewis · Superintendent",
+                "Avery Chen · Architect",
+                "Nia Brooks · Owner Representative",
+                "Apex Electric",
+                "Door Hardware Vendor",
+                "Metro Interiors",
+                "Inspection Agency",
+                "Accounting"
+            ])
+            cc=st.multiselect("CC",[
+                "Marcus Reed · Project Manager",
+                "Dana Lewis · Superintendent",
+                "Avery Chen · Architect",
+                "Nia Brooks · Owner Representative",
+                "Apex Electric",
+                "Door Hardware Vendor",
+                "Metro Interiors",
+                "Inspection Agency",
+                "Accounting"
+            ])
             subject=st.text_input("Subject")
             body=st.text_area("Message",height=130)
             sent=st.form_submit_button("Send Email",use_container_width=True)
@@ -1869,6 +2067,7 @@ def career():
                 status="Awaiting Response"
                 execute("INSERT INTO career_rfis(rfi_no,subject,drawing_ref,question,impact,status,submitted_time) VALUES(?,?,?,?,?,?,?)",(num,subject,refs,question,impact,status,sim_time(state)))
                 execute("UPDATE career_tasks SET status='Done',completed_at=? WHERE task_key='T2'",(sim_time(state),))
+                execute("UPDATE career_tasks SET status='Done',completed_at=? WHERE task_key LIKE 'CREATE_RFI_%' AND status!='Done'",(sim_time(state),))
                 career_activity(state,"RFI",num+" submitted",f"{subject} · {refs} · Status: Awaiting Response")
                 advance_sim(state,15)
                 # Immediate realistic quality reaction.
@@ -1938,7 +2137,21 @@ def career():
     with tabs[5]:
         st.subheader("Project Calendar"); st.write("**8:30 AM** · Framing inspection confirmation deadline"); st.write("**10:00 AM** · OAC Meeting · Owner / Architect / Contractor"); st.write("**12:00 PM** · Pay app internal review"); st.write("**3:00 PM** · Accounting cutoff"); st.write("**Tomorrow 7:00 AM** · Drywall mobilization"); st.write("**Friday** · Metro Interiors COI expiration")
     with tabs[6]:
-        st.subheader("Project Team"); st.dataframe(pd.DataFrame([["Marcus Reed","Project Manager","Cost, owner communication, overall project"],["Dana Lewis","Superintendent","Field operations, sequencing, safety"],["You","Project Coordinator","Logs, documents, follow-up, cost/admin coordination"],["Avery Chen","Project Architect","Design responses, submittals, RFIs"],["Nia Brooks","Owner Representative","Owner decisions and priorities"],["Apex Electric","Electrical Subcontractor","Electrical scope"]],columns=["Name","Role","Primary lane"]),use_container_width=True,hide_index=True)
+        st.subheader("Project Team")
+        st.dataframe(pd.DataFrame([
+            ["Marcus Reed","Project Manager","Cost approval, owner communication, escalation, overall project"],
+            ["Dana Lewis","Superintendent","Field operations, sequencing, safety, site verification"],
+            ["You","Project Coordinator","Logs, documents, follow-up, routing, cost/admin coordination"],
+            ["Avery Chen","Project Architect","Design clarifications, drawing/spec responses, RFIs, submittal review"],
+            ["Nia Brooks","Owner Representative","Owner decisions, selections, client approvals"],
+            ["Luis Ortega / Apex Electric","Electrical Subcontractor","Electrical manpower/material, trade backup, electrical execution"],
+            ["Door Hardware Vendor","Vendor","Hardware package, fabrication, factory slot, lead times"],
+            ["Metro Interiors","Subcontractor","Interiors/drywall scope and its compliance documents"],
+            ["Inspection Agency","Third-party inspection","Inspection scheduling and confirmation"],
+            ["Jasmine Cole / Accounting","Accounting","Payment processing, payment cutoff, administrative backup"]
+        ],columns=["Name","Role","Primary lane"]),use_container_width=True,hide_index=True)
+        if state["mode"]=="Training":
+            st.info("Training tip: choosing the correct recipient is part of the exercise. If you send a clear request to the wrong role, that person may redirect you and explain who should receive it.")
     with tabs[7]:
         st.subheader("📚 Permanent Training Library")
         st.caption("This remains available in Training, Assisted, and Independent modes.")
