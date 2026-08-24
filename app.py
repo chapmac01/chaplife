@@ -155,8 +155,15 @@ def goto(p): st.session_state.page=p
 
 pages = {
  'Home':'🏠', 'Finances':'💰', 'Food & Nutrition':'🥗', 'Grocery Shopping':'🛒', 'My Trainer':'🏋🏾‍♀️',
- 'Water & Jug Puzzles':'💧', 'Vocabulary':'📖', 'Growth Lab':'🌱', 'Conversation & Current Events':'💬', 'Health & Life':'❤️', 'Career Simulator':'🏗️', 'My Progress':'📈', 'Settings':'⚙️'
+ 'Water & Jug Puzzles':'💧', 'Vocabulary':'📖', 'Health & Life':'❤️', 'Career Simulator':'🏗️',
+ 'My Progress':'📈', 'Settings':'⚙️'
 }
+
+# Private sections are hidden from navigation unless explicitly enabled in Settings.
+if bool(get_setting('show_growth_section',False)):
+    pages['Growth Lab']='🌱'
+if bool(get_setting('show_conversation_section',False)):
+    pages['Conversation & Current Events']='💬'
 
 nav_items=list(pages.items())
 for start in range(0,len(nav_items),5):
@@ -291,9 +298,12 @@ def home():
     grid=[
         ('💰','Finances'),('🥗','Food & Nutrition'),('🛒','Grocery Shopping'),
         ('🏋🏾‍♀️','My Trainer'),('💧','Water & Jug Puzzles'),('📖','Vocabulary'),
-        ('🌱','Growth Lab'),('💬','Conversation & Current Events'),('🏗️','Career Simulator'),
-        ('❤️','Health & Life')
+        ('🏗️','Career Simulator'),('❤️','Health & Life')
     ]
+    if bool(get_setting('show_growth_section',False)):
+        grid.append(('🌱','Growth Lab'))
+    if bool(get_setting('show_conversation_section',False)):
+        grid.append(('💬','Conversation & Current Events'))
 
     st.markdown("""
     <style>
@@ -529,9 +539,87 @@ MEALS=[
  {'name':'Peanut butter banana oatmeal','type':'Breakfast','cal':420,'protein':16,'goal':['Build strength / muscle','Maintain weight','General health'],'ingredients':[('Old-fashioned oats','Pantry',0.5,'cup','18 oz canister ≈ 13 servings'),('Milk','Dairy / Eggs',1,'cup','Half gallon = 8 cups'),('Banana','Produce',1,'each','Buy per serving'),('Peanut butter','Pantry',1,'tbsp','16 oz jar')],'steps':['Cook oats with milk.','Slice banana over oats.','Swirl in peanut butter.']},
 ]
 
+
+
+ROUTINE_PRODUCT_CATALOG=[
+    {"brand":"Infinity Hoop","name":"Infinity 30-Day Detox Tea","kind":"Tea","serving":"1 tea bag / cup","caffeine":0,
+     "use_note":"Manufacturer directions: brew one tea bag in hot water and drink once daily."},
+    {"brand":"Infinity Hoop","name":"Pure Berberine","kind":"Supplement","serving":"1 capsule","caffeine":None,
+     "use_note":"Manufacturer page says 1 capsule twice daily, ideally 30–60 minutes before a meal. Keep your own routine editable."},
+    {"brand":"RYZE","name":"Mushroom Coffee · Medium Roast","kind":"Coffee","serving":"1 cup","caffeine":48,
+     "use_note":"Manufacturer reports about 48 mg caffeine per cup."},
+    {"brand":"RYZE","name":"Mushroom Coffee · Dark Roast","kind":"Coffee","serving":"1 cup","caffeine":85,
+     "use_note":"Manufacturer reports about 80–90 mg caffeine per serving; ChapLife uses 85 mg as a midpoint estimate and labels it as an estimate."}
+]
+
+def routine_products():
+    return ROUTINE_PRODUCT_CATALOG + (get_setting("custom_routine_products",[]) or [])
+
+def routine_favorites():
+    return get_setting("routine_product_favorites",[]) or []
+
+HERBALIFE_CATALOG=[
+    {"name":"Formula 1 Healthy Meal Nutritional Shake Mix","category":"Shake / Meal","unit":"serving","cal":None,"protein":None,"caffeine":0},
+    {"name":"Protein Drink Mix","category":"Protein","unit":"serving","cal":None,"protein":None,"caffeine":0},
+    {"name":"Personalized Protein Powder","category":"Protein","unit":"serving","cal":None,"protein":None,"caffeine":0},
+    {"name":"Prolessa Duo","category":"Weight Management Add-in","unit":"serving","cal":None,"protein":None,"caffeine":0},
+    {"name":"Herbal Tea Concentrate","category":"Tea / Energy","unit":"serving","cal":None,"protein":0,"caffeine":85},
+    {"name":"Liftoff","category":"Energy / Drink Enhancer","unit":"serving","cal":None,"protein":0,"caffeine":None},
+    {"name":"Herbalife24 Liftoff","category":"Energy / Drink Enhancer","unit":"stick pack","cal":15,"protein":0,"caffeine":None},
+    {"name":"Herbal Aloe Concentrate","category":"Aloe / Beverage","unit":"serving","cal":None,"protein":0,"caffeine":0},
+    {"name":"Active Fiber Complex","category":"Fiber Add-in","unit":"serving","cal":None,"protein":None,"caffeine":0},
+    {"name":"Herbalife SKIN Collagen Beauty Booster","category":"Collagen / Beauty Drink","unit":"scoop","cal":None,"protein":None,"caffeine":0},
+    {"name":"N-R-G Nature's Raw Guarana Tea","category":"Tea / Energy","unit":"serving","cal":None,"protein":0,"caffeine":None},
+    {"name":"Herbalife24 Hydrate","category":"Hydration","unit":"serving","cal":None,"protein":0,"caffeine":0},
+    {"name":"Beverage Mix","category":"Protein Beverage","unit":"serving","cal":None,"protein":None,"caffeine":0},
+]
+
+def herbalife_product(name):
+    return next((p for p in HERBALIFE_CATALOG if p["name"]==name),None)
+
+def herbalife_favorites():
+    return get_setting("herbalife_favorites",[]) or []
+
+def saved_herbalife_drinks():
+    return get_setting("herbalife_saved_drinks",[]) or []
+
+FAVORITE_MEAL_TEMPLATES={
+    "Overnight oats":{
+        "name":"Overnight oats",
+        "type":"Breakfast","cal":390,"protein":23,
+        "goal":["Lose weight","Maintain weight","Build strength / muscle","Eat more consistently","General health","Other"],
+        "ingredients":[
+            ("Old-fashioned oats","Pantry",0.5,"cup","18 oz canister"),
+            ("Plain Greek yogurt","Dairy / Eggs",0.5,"cup","32 oz tub"),
+            ("Milk","Dairy / Eggs",0.5,"cup","Half gallon"),
+            ("Chia seeds","Pantry",1,"tbsp","Small bag"),
+            ("Berries","Produce",0.5,"cup","1 pint")
+        ],
+        "steps":["Add oats, yogurt, milk and chia seeds to a jar/container.","Stir well, cover and refrigerate overnight.","Add berries before eating."]
+    }
+}
+
+def favorite_meals_from_settings():
+    saved=get_setting("favorite_meals",[]) or []
+    out=[]
+    for m in saved:
+        if isinstance(m,dict) and m.get("name") and m.get("type"):
+            out.append(m)
+    return out
+
+def all_meals():
+    return MEALS + list(FAVORITE_MEAL_TEMPLATES.values()) + favorite_meals_from_settings()
+
+def meal_by_name(name):
+    for m in all_meals():
+        if m["name"]==name: return m
+    return None
+
+
 def meal_pool(meal_type,goal):
-    pool=[m for m in MEALS if m['type']==meal_type and (goal in m['goal'] or goal=='Other')]
-    return pool or [m for m in MEALS if m['type']==meal_type]
+    source=all_meals()
+    pool=[m for m in source if m['type']==meal_type and (goal in m.get('goal',[]) or goal=='Other')]
+    return pool or [m for m in source if m['type']==meal_type]
 
 def aggregate_ingredients(plan):
     agg={}
@@ -552,7 +640,7 @@ def save_plan_grocery(plan):
 
 def food():
     st.title('🥗 Food & Nutrition')
-    tabs=st.tabs(['Lifestyle Profile','Plan My Week','Today / Meal Counter','Eating Out'])
+    tabs=st.tabs(['Lifestyle Profile','Plan My Week','Herbalife Bar','My Go-To Meals','Today / Meal Counter','Eating Out'])
     with tabs[0]:
         prof=get_setting('food_profile',{}) or {}
         with st.form('foodprof'):
@@ -561,6 +649,18 @@ def food():
             calorie_target=st.number_input('Optional daily calorie target for your counter (0 = no target)',min_value=0,max_value=5000,step=50,value=int(prof.get('calorie_target',0) or 0))
             dislikes=st.text_area('Foods you dislike / avoid',value=prof.get('dislikes','')); lifestyle=st.text_area('Lifestyle notes',placeholder='Packable lunches, leftovers, eating out Saturday, etc.',value=prof.get('lifestyle',''))
             if st.form_submit_button('Save lifestyle profile',use_container_width=True): set_setting('food_profile',{'goal':goal,'cook':cook,'time':cooktime,'meals':mealsper,'eatout':eatout,'budget':budget,'calorie_target':calorie_target,'dislikes':dislikes,'lifestyle':lifestyle}); st.rerun()
+        st.divider()
+        st.subheader('Meals I like included')
+        st.caption('These preferences tell the weekly planner to intentionally work your regular foods into the plan instead of only choosing random meals.')
+        prefs=get_setting('meal_include_preferences',{}) or {}
+        include_oats=st.toggle('Include overnight oats',value=bool(prefs.get('overnight_oats',True)),key='pref_oats')
+        include_shake=st.toggle('Include my Herbalife protein shake',value=bool(prefs.get('herbalife_shake',False)),key='pref_herbalife')
+        c=st.columns(2)
+        oats_times=c[0].selectbox('Overnight oats frequency',['1x/week','2x/week','3x/week','4x/week'],index=['1x/week','2x/week','3x/week','4x/week'].index(prefs.get('oats_frequency','2x/week')) if prefs.get('oats_frequency','2x/week') in ['1x/week','2x/week','3x/week','4x/week'] else 1,disabled=not include_oats)
+        shake_times=c[1].selectbox('Herbalife shake frequency',['1x/week','2x/week','3x/week','4x/week','5x/week','Daily'],index=['1x/week','2x/week','3x/week','4x/week','5x/week','Daily'].index(prefs.get('shake_frequency','3x/week')) if prefs.get('shake_frequency','3x/week') in ['1x/week','2x/week','3x/week','4x/week','5x/week','Daily'] else 2,disabled=not include_shake)
+        if st.button('Save meal preferences',use_container_width=True):
+            set_setting('meal_include_preferences',{'overnight_oats':include_oats,'herbalife_shake':include_shake,'oats_frequency':oats_times,'shake_frequency':shake_times})
+            st.success('Meal-plan preferences saved.')
     with tabs[1]:
         prof=get_setting('food_profile',{}) or {}; goal=prof.get('goal','General health')
         st.caption(f'Planning style: simple meals • goal: {goal}. Every meal includes a recipe and exact ingredient amounts.')
@@ -570,6 +670,33 @@ def food():
             plan={}
             for d in days:
                 plan[d]=[random.choice(meal_pool('Breakfast',goal)),random.choice(meal_pool('Lunch',goal)),random.choice(meal_pool('Dinner',goal)),random.choice(meal_pool('Snack',goal))]
+
+            prefs=get_setting('meal_include_preferences',{}) or {}
+            def freq_count(label,n_days):
+                if label=='Daily': return n_days
+                try: return min(n_days,int(label.split('x')[0]))
+                except: return 0
+
+            # Work requested go-to meals into breakfast slots across selected days.
+            selected_days=list(days)
+            breakfast_targets=[]
+            if prefs.get('overnight_oats') and selected_days:
+                breakfast_targets += [('Overnight oats',freq_count(prefs.get('oats_frequency','2x/week'),len(selected_days)))]
+            if prefs.get('herbalife_shake') and selected_days:
+                shake=meal_by_name('My Herbalife protein shake')
+                if shake:
+                    breakfast_targets += [('My Herbalife protein shake',freq_count(prefs.get('shake_frequency','3x/week'),len(selected_days)))]
+
+            cursor=0
+            for meal_name,count in breakfast_targets:
+                fav=meal_by_name(meal_name)
+                if not fav: continue
+                for _ in range(count):
+                    if not selected_days: break
+                    d=selected_days[cursor % len(selected_days)]
+                    plan[d][0]=fav
+                    cursor+=1
+
             st.session_state.meal_plan=plan; set_setting('meal_plan',plan); save_plan_grocery(plan); st.rerun()
         if c[1].button('Clear meal plan',use_container_width=True): st.session_state.pop('meal_plan',None); set_setting('meal_plan',{}); st.rerun()
         plan=st.session_state.get('meal_plan') or get_setting('meal_plan',{})
@@ -591,6 +718,178 @@ def food():
             if st.button('Refresh Grocery Shopping list from this plan',use_container_width=True): save_plan_grocery(plan); st.success('Grocery list updated.')
         else: st.info('Build a plan to create recipes and the grocery list automatically.')
     with tabs[2]:
+        st.subheader('🥤 Herbalife Bar')
+        st.write('Choose the Herbalife products you actually use, favorite your regulars, and combine multiple products into one shake, tea, aloe water, lemonade, or custom drink.')
+        st.caption('Product names/categories are based on the Herbalife U.S. catalog. ChapLife does not invent missing nutrition values; where a product/serving varies, the finished drink shows what still needs label verification.')
+
+        favorites=herbalife_favorites()
+        category=st.selectbox('Browse category',['All']+sorted(set(p['category'] for p in HERBALIFE_CATALOG)),key='hl_category')
+        products=[p for p in HERBALIFE_CATALOG if category=='All' or p['category']==category]
+        search=st.text_input('Search Herbalife products',placeholder='Formula 1, aloe, tea, protein, collagen...',key='hl_search')
+        if search.strip():
+            products=[p for p in products if search.lower() in (p['name']+' '+p['category']).lower()]
+
+        st.markdown('#### Product Library')
+        for p in products:
+            with st.container(border=True):
+                c=st.columns([5,2,2])
+                c[0].markdown(f"**{p['name']}**  \n{p['category']}")
+                c[1].write('⭐ Favorite' if p['name'] in favorites else 'Not favorited')
+                if c[2].button('Remove ⭐' if p['name'] in favorites else 'Add ⭐',key='hlfav_'+re.sub(r'[^a-z0-9]','_',p['name'].lower())):
+                    fav=set(favorites)
+                    if p['name'] in fav: fav.remove(p['name'])
+                    else: fav.add(p['name'])
+                    set_setting('herbalife_favorites',sorted(fav)); st.rerun()
+
+        st.divider()
+        st.markdown('### 🧪 Build My Drink')
+        drink_type=st.segmented_control('What are you making?',['Shake','Tea','Aloe Water','Lemonade / Beauty Drink','Custom'],default='Shake',key='hl_drink_type')
+        fav_first=sorted(HERBALIFE_CATALOG,key=lambda p:(p['name'] not in favorites,p['category'],p['name']))
+        selected=st.multiselect('Add Herbalife products',[p['name'] for p in fav_first],key='hl_drink_products',
+                                help='Your ⭐ favorites appear first.')
+        components=[]
+        known_cal=0; known_pro=0; known_caf=0; unknown_nutrition=[]
+        for name in selected:
+            p=herbalife_product(name)
+            with st.container(border=True):
+                st.markdown(f"**{name}**")
+                c=st.columns(3)
+                amount=c[0].number_input('Amount',min_value=0.0,value=1.0,step=0.5,key='hl_amt_'+re.sub(r'[^a-z0-9]','_',name.lower()))
+                unit=c[1].text_input('Unit',value=p['unit'],key='hl_unit_'+re.sub(r'[^a-z0-9]','_',name.lower()))
+                flavor=c[2].text_input('Flavor / version',key='hl_flavor_'+re.sub(r'[^a-z0-9]','_',name.lower()))
+                components.append({'name':name,'amount':amount,'unit':unit,'flavor':flavor,'category':p['category']})
+                if p['cal'] is None or p['protein'] is None:
+                    unknown_nutrition.append(name)
+                else:
+                    known_cal += p['cal']*amount
+                    known_pro += p['protein']*amount
+                if p['caffeine'] is None:
+                    if 'Energy' in p['category'] or 'Tea' in p['category']: unknown_nutrition.append(name+' caffeine')
+                else:
+                    known_caf += p['caffeine']*amount
+
+        st.markdown('#### Regular ingredients')
+        regular=st.text_area('Add milk/water/fruit/ice/etc. — one per line',
+                             placeholder='Unsweetened almond milk | 8 oz\nBanana | 1/2\nIce | 1 cup',
+                             key='hl_regular_ingredients')
+        c=st.columns(3)
+        c[0].metric('Known calories',f'{known_cal:.0f}')
+        c[1].metric('Known protein',f'{known_pro:.0f} g')
+        c[2].metric('Known caffeine',f'{known_caf:.0f} mg')
+        if unknown_nutrition:
+            st.warning('Nutrition still needs label verification for: '+', '.join(dict.fromkeys(unknown_nutrition))+'. ChapLife will not guess these values.')
+
+        drink_name=st.text_input('Save this combination as',placeholder='My Morning Shake, My Tea, My Skin Lemonade...',key='hl_drink_name')
+        c=st.columns(2)
+        if c[0].button('💾 Save Combination',use_container_width=True,key='save_hl_combo'):
+            if drink_name.strip() and components:
+                drinks=[d for d in saved_herbalife_drinks() if d.get('name')!=drink_name.strip()]
+                drinks.append({'name':drink_name.strip(),'type':drink_type,'products':components,'regular':regular,
+                               'known_cal':known_cal,'known_protein':known_pro,'known_caffeine':known_caf,
+                               'needs_verification':list(dict.fromkeys(unknown_nutrition))})
+                set_setting('herbalife_saved_drinks',drinks)
+                st.success('Combination saved.')
+            else:
+                st.warning('Choose at least one Herbalife product and give the drink a name.')
+
+        if c[1].button('✓ I had this drink',use_container_width=True,key='log_hl_combo'):
+            if components:
+                execute('INSERT INTO meals(meal_date,meal_name,calories,protein,source) VALUES(?,?,?,?,?)',
+                        (date.today().isoformat(),drink_name.strip() or f'Herbalife {drink_type}',int(known_cal),int(known_pro),'Herbalife Bar'))
+                st.success('Added to today’s meal counter. Known nutrition was logged; any unverified product values are not guessed.')
+            else:
+                st.warning('Add products to the drink first.')
+
+        drinks=saved_herbalife_drinks()
+        if drinks:
+            st.markdown('### ❤️ My Usual Herbalife Drinks')
+            for d in drinks:
+                with st.container(border=True):
+                    st.markdown(f"**{d['name']}** · {d.get('type','Drink')}")
+                    st.write(' + '.join((x.get('flavor')+' ' if x.get('flavor') else '')+x['name'] for x in d.get('products',[])))
+                    if d.get('regular'): st.caption('Also: '+d['regular'].replace('\n',' · '))
+                    c=st.columns(3)
+                    c[0].metric('Known cal',f"{d.get('known_cal',0):.0f}")
+                    c[1].metric('Known protein',f"{d.get('known_protein',0):.0f} g")
+                    c[2].metric('Known caffeine',f"{d.get('known_caffeine',0):.0f} mg")
+                    if d.get('needs_verification'): st.caption('Label check needed: '+', '.join(d['needs_verification']))
+
+    with tabs[3]:
+        st.subheader('⭐ My Go-To Meals')
+        st.write('Save meals you use regularly so the planner can intentionally include them and the grocery list can buy the right amounts.')
+
+        with st.container(border=True):
+            st.markdown('### 🥤 My Herbalife protein shake')
+            st.caption('Enter what you actually use. Herbalife nutrition can vary by product, flavor, serving size, liquid and add-ins, so ChapLife will use your label/recipe values instead of guessing.')
+            existing=meal_by_name('My Herbalife protein shake')
+            with st.form('herbalife_recipe'):
+                c=st.columns(2)
+                product=c[0].text_input('Herbalife product / flavor',value=(existing or {}).get('product',''),placeholder='Example: Formula 1, flavor...')
+                serving=c[1].text_input('Amount of Herbalife product',value=(existing or {}).get('serving',''),placeholder='Example: 2 scoops / label serving')
+                c=st.columns(3)
+                liquid=c[0].text_input('Liquid + amount',value=(existing or {}).get('liquid',''),placeholder='Example: 8 oz unsweetened almond milk')
+                calories=c[1].number_input('Calories for YOUR finished shake',min_value=0,step=10,value=int((existing or {}).get('cal',0) or 0))
+                protein=c[2].number_input('Protein for YOUR finished shake (g)',min_value=0,step=1,value=int((existing or {}).get('protein',0) or 0))
+                extras=st.text_area('Regular add-ins + amounts',value=(existing or {}).get('extras',''),placeholder='Example: 1/2 banana, 1 tbsp peanut butter, ice')
+                grocery=st.text_area('Ingredients for grocery list — one per line',value=(existing or {}).get('grocery_text',''),placeholder='Unsweetened almond milk | Dairy / Eggs | 8 | oz | Half gallon\nBanana | Produce | 0.5 | each | Buy per serving')
+                if st.form_submit_button('Save Herbalife shake',use_container_width=True):
+                    ingredients=[]
+                    # Herbalife product itself is included if user provides an amount, but free-text units stay practical.
+                    if product.strip() and serving.strip():
+                        ingredients.append((f'Herbalife {product.strip()}','Pantry',1,'serving',f'Use {serving.strip()} per shake'))
+                    for line in grocery.splitlines():
+                        parts=[p.strip() for p in line.split('|')]
+                        if len(parts)>=5:
+                            try: ingredients.append((parts[0],parts[1],float(parts[2]),parts[3],parts[4]))
+                            except: pass
+                    shake={'name':'My Herbalife protein shake','type':'Breakfast','cal':calories,'protein':protein,
+                           'goal':['Lose weight','Maintain weight','Build strength / muscle','Eat more consistently','General health','Other'],
+                           'ingredients':ingredients,
+                           'steps':[f'Add {serving or "your measured serving"} of {product or "Herbalife product"} to {liquid or "your chosen liquid"}.',
+                                    'Add your regular extras if using them.','Blend until smooth and serve.'],
+                           'product':product,'serving':serving,'liquid':liquid,'extras':extras,'grocery_text':grocery}
+                    saved=[m for m in favorite_meals_from_settings() if m.get('name')!='My Herbalife protein shake']
+                    saved.append(shake); set_setting('favorite_meals',saved)
+                    st.success('Herbalife shake saved. You can now tell the weekly planner to include it.')
+
+        with st.container(border=True):
+            st.markdown('### 🫙 Overnight oats')
+            st.write('A starter overnight-oats recipe is already available to the planner: oats + Greek yogurt + milk + chia seeds + berries.')
+            st.caption('You can still add your own custom go-to meal below if your overnight oats are different.')
+
+        with st.expander('➕ Add another go-to meal'):
+            with st.form('custom_go_to'):
+                c=st.columns(2)
+                fav_name=c[0].text_input('Meal name')
+                fav_type=c[1].selectbox('Meal type',['Breakfast','Lunch','Dinner','Snack'])
+                c=st.columns(2)
+                fav_cal=c[0].number_input('Calories per serving',min_value=0,step=10)
+                fav_pro=c[1].number_input('Protein per serving (g)',min_value=0,step=1)
+                fav_ing=st.text_area('Ingredients — one per line',placeholder='Chicken breast | Meat / Protein | 5 | oz | Buy raw weight\nRice, dry | Pantry | 0.25 | cup | 1 lb bag')
+                fav_steps=st.text_area('Recipe steps — one per line')
+                if st.form_submit_button('Save go-to meal',use_container_width=True):
+                    ingredients=[]
+                    for line in fav_ing.splitlines():
+                        parts=[p.strip() for p in line.split('|')]
+                        if len(parts)>=5:
+                            try: ingredients.append((parts[0],parts[1],float(parts[2]),parts[3],parts[4]))
+                            except: pass
+                    if fav_name.strip() and ingredients:
+                        meal={'name':fav_name.strip(),'type':fav_type,'cal':fav_cal,'protein':fav_pro,
+                              'goal':['Lose weight','Maintain weight','Build strength / muscle','Eat more consistently','General health','Other'],
+                              'ingredients':ingredients,'steps':[x.strip() for x in fav_steps.splitlines() if x.strip()] or ['Prepare ingredients and combine.']}
+                        saved=[m for m in favorite_meals_from_settings() if m.get('name')!=fav_name.strip()]
+                        saved.append(meal); set_setting('favorite_meals',saved); st.success('Go-to meal saved.')
+                    else:
+                        st.warning('Add a meal name and at least one ingredient with an amount.')
+
+        saved=favorite_meals_from_settings()
+        if saved:
+            st.markdown('#### Saved go-to meals')
+            for m in saved:
+                st.write(f"• **{m['name']}** — {m.get('cal',0)} cal · {m.get('protein',0)}g protein")
+
+    with tabs[4]:
         today=date.today().isoformat(); m=df_from('SELECT * FROM meals WHERE meal_date=? ORDER BY id DESC',(today,)); cal=m.calories.sum() if not m.empty else 0; protein=m.protein.sum() if not m.empty else 0
         target=safe_float((get_setting('food_profile',{}) or {}).get('calorie_target',0)); c=st.columns(3); c[0].metric('Calories logged today',f'{cal:.0f}'); c[1].metric('Protein logged',f'{protein:.0f} g'); c[2].metric('Target remaining',f'{max(0,target-cal):.0f}' if target else 'No target')
         if target: st.progress(min(1,cal/target if target else 0))
@@ -600,7 +899,7 @@ def food():
             note=st.text_input('Notes');
             if st.form_submit_button('Add manually'): execute('INSERT INTO meals(meal_date,meal_type,meal_name,calories,protein,source,place,rating,note) VALUES(?,?,?,?,?,?,?,?,?)',(today,mt,name,calories,protein_g,'Manual','','',note)); st.rerun()
         delete_reset_panel('meals','meal logs','meal_name')
-    with tabs[3]:
+    with tabs[5]:
         st.subheader('Eating Out / Restaurant Tracker')
         place=st.text_input('Restaurant / café / bar / place',placeholder='Chipotle, Starbucks, local restaurant...'); item=st.text_input('Food or drink ordered'); custom=st.text_input('Customizations')
         if place and item:
@@ -1437,12 +1736,43 @@ TRAINING_GUIDES={
 "mistakes":"Treating an approval stamp as permission to ignore reviewer comments or failing to distribute the returned package."
 }}
 
+
+def career_training_mastery(topic):
+    key="career_mastery_"+re.sub(r"[^a-z0-9]+","_",topic.lower()).strip("_")
+    return int(st.session_state.get(key,0))
+
+def career_training_complete(topic):
+    key="career_mastery_"+re.sub(r"[^a-z0-9]+","_",topic.lower()).strip("_")
+    st.session_state[key]=int(st.session_state.get(key,0))+1
+
+def training_coach(state,title,goal,steps,why="",source_rule=""):
+    if state.get("mode")!="Training": return
+    mastery=career_training_mastery(title)
+    with st.container(border=True):
+        st.markdown(f"### 🧭 Training Coach · {title}")
+        st.markdown(f"**Current goal:** {goal}")
+        with st.expander("Why am I doing this?",expanded=(mastery==0)):
+            st.write(why)
+        st.caption("BASE RULE: ChapLife will never require information or an action that is not actually available to you in the simulator.")
+        if source_rule: st.info("📌 Where to find what you need: "+source_rule)
+        if mastery==0:
+            st.markdown("**Full walkthrough**")
+            for i,s in enumerate(steps,1): st.markdown(f"**Step {i} of {len(steps)}** — {s}")
+        elif mastery==1:
+            st.markdown("**Guided practice**")
+            for i,s in enumerate(steps,1): st.write(f"{i}. {s}")
+        else:
+            st.markdown("**Practice mode** — you've done this workflow before.")
+            with st.expander("Teach Me Again"):
+                for i,s in enumerate(steps,1): st.write(f"{i}. {s}")
+
 def training_box(topic,state):
     g=TRAINING_GUIDES[topic]
     with st.container(border=True):
         st.markdown(f"### 🎓 Training Assistant — {topic}")
         if state.get("mode")=="Training":
             st.info(g["what"])
+            st.caption("BASE RULE: every required fact, document, number, deadline, contact, and action must be accessible in the simulator.")
             st.markdown("**How to complete it**")
             for i,x in enumerate(g["steps"],1): st.write(f"{i}. {x}")
             with st.expander("👀 Completed example",expanded=True): st.code(g["example"])
@@ -2082,6 +2412,17 @@ def career():
 
         inspection_task=rows("SELECT * FROM career_tasks WHERE task_key='T1' AND status!='Done' LIMIT 1")
         if inspection_task:
+            training_coach(state,"Inspection Follow-up","Get the framing inspection confirmed before 8:30 AM and close the loop with Dana.",[
+                "Read Dana's message and identify exactly what she needs.",
+                "Use Team to identify who controls inspection scheduling: Inspection Agency.",
+                "Compose to Inspection Agency and CC Dana Lewis · Superintendent.",
+                "Use a clear project/request subject.",
+                "Ask for the date/time, explain drywall is tomorrow, and state the before-8:30 AM deadline.",
+                "Send it. Do not mark the task Done yet; you still need confirmation.",
+                "Wait for the response in simulated time and follow up if needed.",
+                "When confirmation arrives, communicate it to Dana/field, then close the task."
+            ],"Dana needs controlled information before sequencing drywall. Your job is to obtain it, document it, and close the loop.",
+            "Inbox = request/deadline · Team = responsible contact · Calendar = deadline/drywall mobilization.")
             with st.container(border=True):
                 st.markdown("#### 🧭 Training help · Inspection confirmation")
                 st.write("Dana is asking you to **chase the framing inspection confirmation**. You are not confirming the inspection yourself — you need to contact the party that controls the inspection schedule.")
@@ -2164,13 +2505,25 @@ def career():
     with tabs[3]:
         st.subheader("RFI Desk")
         training_box("RFI",state)
+        training_coach(state,"RFI Workflow","Document the A-402 / E-201 conflict and obtain formal design direction.",[
+            "Start with Apex's incoming message: the conflict affects Rooms 204–210.",
+            "Verify A-402 Rev 3 and E-201 Rev 2 are CURRENT in Document Control.",
+            "Read the document notes: A-402 Detail 2 = 18\" AFF; E-201 Detail 3 = 24\" AFF.",
+            "Create a short RFI subject naming the issue/location.",
+            "Reference A-402 Detail 2 and E-201 Detail 3.",
+            "State the 18\" vs 24\" conflict factually.",
+            "Ask which mounting height governs. Do not choose the design answer yourself.",
+            "Route the RFI and wait for the architect's formal response.",
+            "Distribute the response to the affected field team and update the record."
+        ],"The coordinator documents the conflict; the design professional resolves it. The RFI becomes the formal project record.",
+        "Apex Inbox = issue/location · Document Control = revisions + 18\"/24\" values · Team = design contact.")
         st.warning("Electrical is waiting: E-201 and A-402 show conflicting outlet mounting heights in Rooms 204–210.")
 
         st.markdown("#### 📚 Document Control")
         st.caption("This is where you perform Step 1. Verify that the drawings/specifications you are about to reference are current.")
         current_docs=pd.DataFrame([
-            ["A-402","Architectural","Interior Elevations / Device Locations","Rev 3","2026-08-18","CURRENT"],
-            ["E-201","Electrical","Second Floor Power Plan","Rev 2","2026-08-12","CURRENT"],
+            ["A-402","Architectural","Interior Elevations / Device Locations","Rev 3","2026-08-18","CURRENT · Detail 2: receptacles 18\" AFF"],
+            ["E-201","Electrical","Second Floor Power Plan","Rev 2","2026-08-12","CURRENT · Detail 3: receptacles 24\" AFF"],
             ["A-501","Architectural","Wall Details","Rev 1","2026-07-29","CURRENT"],
             ["E-501","Electrical","Electrical Details","Rev 1","2026-07-30","CURRENT"],
             ["26 27 26","Specification","Wiring Devices","IFC","2026-08-01","CURRENT"]
@@ -2227,6 +2580,7 @@ def career():
                     execute("UPDATE career_rfis SET response=? WHERE rfi_no=?",('Avery acknowledged receipt. Design response pending.',num))
                     career_activity(state,"RFI Response",num+" acknowledged","Avery Chen confirmed receipt; response pending.")
                     st.session_state["rfi_ok"]=f"✅ {num} SUBMITTED at {sim_time(state)}. It is saved in the RFI Log and Avery acknowledged it."
+                    career_training_complete("RFI Workflow")
                     career_queue_message(state,12,"Avery Chen · Architect","Design review — "+num,
                                          'I reviewed the conflict. Use 18" AFF in Rooms 204–210. Please distribute this clarification to the field and update the RFI log.',
                                          "RFI Answer",
@@ -2250,6 +2604,15 @@ def career():
     with tabs[4]:
         st.subheader("Cost Desk · Apex Electric Pay Application")
         training_box("Pay Application",state)
+        training_coach(state,"Pay Application Review","Determine whether Apex Electric's requested payment is supported.",[
+            "Read the contract, previously paid, requested, and field-progress figures below.",
+            "Compare requested billing with verified field progress.",
+            "If unsupported, hold for verification or return for correction.",
+            "Document the discrepancy and what backup/correction is needed.",
+            "Submit the review and watch for realistic reactions in simulated time.",
+            "Keep follow-up open until the supported amount is documented."
+        ],"This protects the project from unsupported payment while keeping legitimate payment moving.",
+        "Cost Desk = financial/progress figures · Accounting Inbox = payment deadline.")
         c=st.columns(4); c[0].metric("Contract","$620,000"); c[1].metric("Previously paid","$310,000"); c[2].metric("Requested","$248,000"); c[3].metric("Field progress","~70%")
         st.warning("Billing requests approximately 90% complete while field reporting indicates about 70% installed.")
         with st.form("cost_review",clear_on_submit=True):
@@ -2271,6 +2634,7 @@ def career():
                                          "We disagree with holding the full amount. Material is onsite and rough-in is substantially complete in released areas. I can send invoices and a progress markup.",
                                          "Trade Pushback")
                     st.session_state["cost_ok"]="✅ REVIEW SUBMITTED. "+msg
+                    career_training_complete("Pay Application Review")
                 else:
                     msg="Marcus returned your review. Field progress does not support the billed percentage; verify before approval."
                     career_activity(state,"Cost Review","Apex Pay App returned for revision",msg)
@@ -2376,7 +2740,7 @@ def health_summary():
 def health():
     st.title("❤️ Health & Life")
     st.caption("Activity, cycle, medicines/supplements, vitamins, and schedule-aware planning in one place.")
-    tabs=st.tabs(["Today","📱 Samsung Health","🩸 Cycle","💊 Medicines & Supplements","🧪 Nutrients","📅 Calendar Planning","📈 Health Progress"])
+    tabs=st.tabs(["Today","☀️ My Routine","📱 Samsung Health","🩸 Cycle","💊 Medicines & Supplements","🧪 Nutrients","📅 Calendar Planning","📈 Health Progress"])
 
     with tabs[0]:
         h,med_count,taken_count,cy=health_summary()
@@ -2405,6 +2769,62 @@ def health():
                         (date.today().isoformat(),steps,active,total,hr,resting,mins,sleep,"Manual",note)); st.rerun()
 
     with tabs[1]:
+        st.subheader("☀️ My Products & Routine")
+        st.write("Keep your regular drinks, teas and supplements together. Favorite what you use most and choose when you normally use it.")
+        st.caption("Manufacturer directions are shown as reference. Your saved routine is editable; ChapLife does not turn product marketing claims into medical advice.")
+
+        favs=routine_favorites()
+        for p in routine_products():
+            ident=f"{p['brand']} · {p['name']}"
+            with st.container(border=True):
+                c=st.columns([5,2])
+                c[0].markdown(f"**{p['name']}**  \n{p['brand']} · {p['kind']} · {p['serving']}")
+                if p.get('caffeine') is not None:
+                    c[0].caption(f"Caffeine: {p['caffeine']} mg per listed serving" + (" (midpoint estimate)" if "Dark Roast" in p['name'] else ""))
+                c[0].caption(p.get('use_note',''))
+                if c[1].button("Remove ⭐" if ident in favs else "Add ⭐",key="routinefav_"+re.sub(r'[^a-z0-9]','_',ident.lower())):
+                    s=set(favs)
+                    if ident in s: s.remove(ident)
+                    else: s.add(ident)
+                    set_setting("routine_product_favorites",sorted(s)); st.rerun()
+
+        st.markdown("### Set My Usual Routine")
+        saved=get_setting("daily_product_routine",{}) or {}
+        product_names=[f"{p['brand']} · {p['name']}" for p in sorted(routine_products(),key=lambda p:(f"{p['brand']} · {p['name']}" not in favs,p['brand'],p['name']))]
+        chosen=st.multiselect("Products I regularly use",product_names,default=[x for x in saved.keys() if x in product_names],key="routine_chosen")
+        new_routine={}
+        for ident in chosen:
+            oldv=saved.get(ident,{})
+            with st.container(border=True):
+                st.markdown(f"**{ident}**")
+                c=st.columns(3)
+                when=c[0].selectbox("Usual time",["Morning","With breakfast","Before lunch","With lunch","Afternoon","Before dinner","With dinner","Evening","Flexible"],
+                                    index=["Morning","With breakfast","Before lunch","With lunch","Afternoon","Before dinner","With dinner","Evening","Flexible"].index(oldv.get("when","Morning")) if oldv.get("when","Morning") in ["Morning","With breakfast","Before lunch","With lunch","Afternoon","Before dinner","With dinner","Evening","Flexible"] else 0,
+                                    key="when_"+re.sub(r'[^a-z0-9]','_',ident.lower()))
+                amount=c[1].text_input("My amount",value=oldv.get("amount","1 serving"),key="amt_"+re.sub(r'[^a-z0-9]','_',ident.lower()))
+                days=c[2].selectbox("Frequency",["Daily","Weekdays","Weekends","As needed","Custom"],index=["Daily","Weekdays","Weekends","As needed","Custom"].index(oldv.get("days","Daily")) if oldv.get("days","Daily") in ["Daily","Weekdays","Weekends","As needed","Custom"] else 0,key="days_"+re.sub(r'[^a-z0-9]','_',ident.lower()))
+                new_routine[ident]={"when":when,"amount":amount,"days":days}
+        if st.button("Save My Routine",use_container_width=True,key="save_product_routine"):
+            set_setting("daily_product_routine",new_routine); st.success("Routine saved.")
+
+        st.markdown("### Today's Routine")
+        routine=get_setting("daily_product_routine",{}) or {}
+        log=get_setting("routine_check_log",{}) or {}
+        todaykey=date.today().isoformat()
+        todaylog=log.get(todaykey,{})
+        caffeine_total=0
+        for ident,v in routine.items():
+            p=next((x for x in routine_products() if f"{x['brand']} · {x['name']}"==ident),None)
+            checked=st.checkbox(f"{ident} · {v.get('when','')} · {v.get('amount','')}",value=bool(todaylog.get(ident,False)),key="routinecheck_"+re.sub(r'[^a-z0-9]','_',ident.lower()))
+            todaylog[ident]=checked
+            if checked and p and p.get("caffeine") is not None:
+                caffeine_total+=p["caffeine"]
+        log[todaykey]=todaylog
+        set_setting("routine_check_log",log)
+        st.metric("Known caffeine from checked routine drinks",f"{caffeine_total:.0f} mg")
+        st.caption("This total only includes products with manufacturer-grounded caffeine values in ChapLife.")
+
+    with tabs[2]:
         st.subheader("📱 Import Samsung Health Screenshot")
         st.info("Upload a screenshot, then confirm the numbers before saving. ChapLife keeps active calories and total calories separate.")
         up=st.file_uploader("Samsung Health screenshot",type=["png","jpg","jpeg"],key="samsung_health")
@@ -2430,7 +2850,7 @@ def health():
                     execute("INSERT INTO health_imports(import_date,import_type,filename,extracted_text,confirmed) VALUES(?,?,?,?,1)",(date.today().isoformat(),"Samsung Health",up.name,"User-confirmed screenshot values"))
                     st.success("✓ Samsung Health data saved."); st.rerun()
 
-    with tabs[2]:
+    with tabs[3]:
         st.subheader("🩸 Cycle Tracker")
         with st.form("cyclelog",clear_on_submit=True):
             c=st.columns(4)
@@ -2450,7 +2870,7 @@ def health():
         st.caption("Cycle timing shown by ChapLife is an estimate based on what you log, not a medical prediction.")
         delete_reset_panel("cycle_logs","cycle logs","log_date")
 
-    with tabs[3]:
+    with tabs[4]:
         st.subheader("💊 Medicines & Supplements")
         st.caption("Prescription • OTC • Vitamin • Supplement • Other")
         st.markdown("#### 📸 Scan Bottle / Label")
@@ -2488,7 +2908,7 @@ def health():
                     execute("UPDATE medicines SET active=0 WHERE id=?",(m["id"],)); st.rerun()
                 st.caption("Would I benefit from this? ChapLife can organize the ingredients, your stated goal, and overlaps; medication/supplement changes should not be made from this tracker alone.")
 
-    with tabs[4]:
+    with tabs[5]:
         st.subheader("🧪 Vitamin & Nutrient Information")
         meds=rows("SELECT * FROM medicines WHERE active=1 ORDER BY name")
         if meds:
@@ -2515,7 +2935,7 @@ def health():
             st.caption("These totals reflect only label amounts you saved. Food micronutrients should remain separately identified unless reliable amounts are available.")
         else: st.info("Add label nutrients from your medicines/supplements to see overlaps here.")
 
-    with tabs[5]:
+    with tabs[6]:
         st.subheader("📅 Calendar-Aware Planning")
         st.success("Google Calendar connection is available for ChapLife planning.")
         st.write("Calendar events can influence **meal difficulty, meal timing, workout length, workout timing, and whether a meal may need to be away from home**.")
@@ -2526,7 +2946,7 @@ def health():
         if not events.empty: st.dataframe(events,use_container_width=True,hide_index=True)
         st.caption("The downloaded local app contains the planning interface. Live Google Calendar syncing requires the hosted/connected version rather than embedding your account credentials in the ZIP.")
 
-    with tabs[6]:
+    with tabs[7]:
         st.subheader("📈 Health Progress")
         h=df_from("SELECT * FROM health_daily ORDER BY log_date DESC")
         if h.empty: st.info("Save health data for a few days to begin seeing trends.")
@@ -2555,13 +2975,25 @@ def settings_page():
     tabs=st.tabs(['Display & Progress','📅 Calendar','🥗 Meal Planning','🏋🏾‍♀️ Workout Planning','❤️ Health','Data & Privacy'])
 
     with tabs[0]:
+        st.subheader('Private section visibility')
+        st.write('Growth and Conversation are **hidden from the main app by default**. Turning them on only changes visibility; it does not delete or reset anything.')
+        show_growth_main=st.toggle('Show Growth Lab in navigation & dashboard',value=bool(get_setting('show_growth_section',False)),key='set_show_growth_main')
+        show_convo_main=st.toggle('Show Conversation & Current Events in navigation & dashboard',value=bool(get_setting('show_conversation_section',False)),key='set_show_convo_main')
+        if show_growth_main!=bool(get_setting('show_growth_section',False)):
+            set_setting('show_growth_section',show_growth_main); st.rerun()
+        if show_convo_main!=bool(get_setting('show_conversation_section',False)):
+            set_setting('show_conversation_section',show_convo_main); st.rerun()
+
+        st.caption('When hidden, these section names do not appear on the Home dashboard or top navigation.')
+
+        st.divider()
         st.subheader('My Progress sections')
-        st.write('Hide sections you do not want to see in **My Progress**. Your saved information is not deleted.')
-        show_growth=st.toggle('Show Growth in My Progress',value=bool(get_setting('progress_show_growth',True)),key='set_progress_growth')
-        show_convo=st.toggle('Show Conversation in My Progress',value=bool(get_setting('progress_show_conversation',True)),key='set_progress_convo')
-        if show_growth!=bool(get_setting('progress_show_growth',True)):
+        st.write('You can separately hide their progress details too. Your saved information is not deleted.')
+        show_growth=st.toggle('Show Growth in My Progress',value=bool(get_setting('progress_show_growth',False)),key='set_progress_growth')
+        show_convo=st.toggle('Show Conversation in My Progress',value=bool(get_setting('progress_show_conversation',False)),key='set_progress_convo')
+        if show_growth!=bool(get_setting('progress_show_growth',False)):
             set_setting('progress_show_growth',show_growth); st.rerun()
-        if show_convo!=bool(get_setting('progress_show_conversation',True)):
+        if show_convo!=bool(get_setting('progress_show_conversation',False)):
             set_setting('progress_show_conversation',show_convo); st.rerun()
 
         st.divider()
@@ -2623,8 +3055,8 @@ def settings_page():
 # ---------- Progress ----------
 def progress():
     st.title('📈 My Progress')
-    show_growth=bool(get_setting('progress_show_growth',True))
-    show_convo=bool(get_setting('progress_show_conversation',True))
+    show_growth=bool(get_setting('progress_show_growth',False))
+    show_convo=bool(get_setting('progress_show_conversation',False))
 
     tab_names=['Overview','Money','Nutrition','Fitness & Water']
     if show_growth: tab_names.append('Growth')
@@ -2741,6 +3173,10 @@ def progress():
 
 # ---------- Render ----------
 page=st.session_state.page
+if page=='Growth Lab' and not bool(get_setting('show_growth_section',False)):
+    page='Home'; st.session_state.page='Home'
+if page=='Conversation & Current Events' and not bool(get_setting('show_conversation_section',False)):
+    page='Home'; st.session_state.page='Home'
 if page=='Home': home()
 elif page=='Finances': finances()
 elif page=='Food & Nutrition': food()
