@@ -1,6 +1,6 @@
 import streamlit as st
 import streamlit.components.v1 as components
-import sqlite3, json, math, random, urllib.parse, urllib.request, urllib.error, xml.etree.ElementTree as ET, re, html, base64, os
+import sqlite3, json, math, random, io, urllib.parse, urllib.request, urllib.error, xml.etree.ElementTree as ET, re, html, base64, os, hmac, hashlib, secrets, time
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from collections import deque, defaultdict
@@ -10,6 +10,8 @@ APP_DIR = Path(__file__).parent
 DB_PATH = APP_DIR / 'chaplife.db'
 
 st.set_page_config(page_title='ChapLife', page_icon='✨', layout='wide', initial_sidebar_state='collapsed')
+
+BUILD_VERSION='ChapLife Cloud v5.3'
 
 st.markdown('''
 <style>
@@ -234,12 +236,17 @@ def cloud_logout():
         st.session_state.pop(k,None)
 
 def cloud_auth_gate():
+    st.caption(f"☁️ {BUILD_VERSION}")
     if not CLOUD_CONFIGURED:
-        st.error("ChapLife cloud sync is not configured yet. Add SUPABASE_URL and SUPABASE_PUBLISHABLE_KEY in Streamlit Secrets.")
+        st.error("Cloud build is running, but Supabase is not fully configured.")
+        st.write("Secret check:")
+        st.write(f"• SUPABASE_URL present: **{'Yes' if bool(SUPABASE_URL) else 'No'}**")
+        st.write(f"• SUPABASE_PUBLISHABLE_KEY present: **{'Yes' if bool(SUPABASE_KEY) else 'No'}**")
+        st.info("Open Streamlit → Manage app → Settings → Secrets, correct the missing entry, save, then reboot the app.")
         st.stop()
 
     if not st.session_state.get("_chaplife_cloud_session"):
-        st.markdown('<div class="hero"><h1>✨ ChapLife</h1><p>Private sign-in • one account • same data on phone and computer.</p></div>',unsafe_allow_html=True)
+        st.markdown('<div class="hero"><h1>✨ ChapLife Cloud</h1><p>Private sign-in • one account • same data on phone and computer.</p></div>',unsafe_allow_html=True)
         signin,create=st.tabs(["Sign in","Create my ChapLife account"])
         with signin:
             with st.form("cloud_signin"):
@@ -302,7 +309,33 @@ cloud_auth_gate()
 _cloud=_cloud_session()
 _user_email=(_cloud.get("user") or {}).get("email","")
 acct=st.columns([5,1,1])
-acct[0].caption(f"☁️ Private cloud sync active" + (f" · {_user_email}" if _user_email else ""))
+acct[0].caption(f"☁️ {BUILD_VERSION} · Private cloud sync active" + (f" · {_user_email}" if _user_email else ""))
+
+# Automatic cloud sync every two minutes while this app session is open.
+# Streamlit's timed fragment reruns without throwing away the signed-in session.
+if hasattr(st, "fragment"):
+    @st.fragment(run_every=120)
+    def _cloud_auto_sync_heartbeat():
+        st.caption("🔄 Auto-sync: every 2 minutes")
+        try:
+            # Push current state first so recent local interactions are safe,
+            # then keep the cloud copy current. Existing writes already push immediately.
+            cloud_push_db()
+            st.session_state["_cloud_last_sync"]=datetime.now().strftime("%I:%M:%S %p")
+            # Calendar is less volatile than app state; refresh about every 15 minutes.
+            if GOOGLE_CAL_CONFIGURED and google_calendar_connected():
+                last_auto=float(st.session_state.get("_google_auto_sync_epoch",0) or 0)
+                if time.time()-last_auto>=900:
+                    try:
+                        google_calendar_sync(21)
+                        st.session_state["_google_auto_sync_epoch"]=time.time()
+                    except Exception:
+                        pass
+        except Exception as e:
+            st.session_state["_cloud_sync_error"]=str(e)
+    _cloud_auto_sync_heartbeat()
+else:
+    st.caption("🔄 Auto-sync is enabled on supported Streamlit versions; manual Sync remains available.")
 if acct[1].button("↕ Sync now",use_container_width=True,key="manual_cloud_sync"):
     try:
         cloud_push_db(); st.success("Synced.")
@@ -312,6 +345,181 @@ if acct[2].button("Sign out",use_container_width=True,key="cloud_signout"):
     cloud_logout(); st.rerun()
 if st.session_state.get("_cloud_sync_error"):
     st.warning("Cloud sync warning: "+st.session_state.pop("_cloud_sync_error"))
+
+
+# ---------- Google Calendar OAuth ----------
+GOOGLE_CLIENT_ID=_secret("GOOGLE_CLIENT_ID")
+GOOGLE_CLIENT_SECRET=_secret("GOOGLE_CLIENT_SECRET")
+GOOGLE_REDIRECT_URI=_secret("GOOGLE_REDIRECT_URI")
+GOOGLE_CAL_SCOPE="https://www.googleapis.com/auth/calendar.readonly"
+GOOGLE_CAL_CONFIGURED=bool(GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET and GOOGLE_REDIRECT_URI)
+
+def _google_state_make():
+    token,uid=_cloud_headers()
+    if not uid: return ""
+    payload=f"{uid}|{int(time.time())}|{secrets.token_urlsafe(12)}"
+    sig=hmac.new(GOOGLE_CLIENT_SECRET.encode(),payload.encode(),hashlib.sha256).hexdigest()
+    return base64.urlsafe_b64encode(f"{payload}|{sig}".encode()).decode()
+
+def _google_state_valid(state):
+    try:
+        raw=base64.urlsafe_b64decode(state.encode()).decode()
+        uid,ts,nonce,sig=raw.rsplit("|",3)
+        payload=f"{uid}|{ts}|{nonce}"
+        expected=hmac.new(GOOGLE_CLIENT_SECRET.encode(),payload.encode(),hashlib.sha256).hexdigest()
+        _,current_uid=_cloud_headers()
+        return hmac.compare_digest(sig,expected) and uid==current_uid and abs(int(time.time())-int(ts))<1200
+    except Exception:
+        return False
+
+def google_auth_url():
+    state=_google_state_make()
+    params={
+        "client_id":GOOGLE_CLIENT_ID,
+        "redirect_uri":GOOGLE_REDIRECT_URI,
+        "response_type":"code",
+        "scope":GOOGLE_CAL_SCOPE,
+        "access_type":"offline",
+        "include_granted_scopes":"true",
+        "prompt":"consent",
+        "state":state
+    }
+    return "https://accounts.google.com/o/oauth2/v2/auth?"+urllib.parse.urlencode(params)
+
+def _google_token_request(data):
+    encoded=urllib.parse.urlencode(data).encode()
+    req=urllib.request.Request(
+        "https://oauth2.googleapis.com/token",
+        data=encoded,
+        headers={"Content-Type":"application/x-www-form-urlencoded"},
+        method="POST"
+    )
+    try:
+        with urllib.request.urlopen(req,timeout=20) as r:
+            return json.loads(r.read().decode())
+    except urllib.error.HTTPError as e:
+        body=e.read().decode(errors="ignore")
+        raise RuntimeError(body or str(e))
+
+def google_exchange_code(code):
+    tok=_google_token_request({
+        "code":code,
+        "client_id":GOOGLE_CLIENT_ID,
+        "client_secret":GOOGLE_CLIENT_SECRET,
+        "redirect_uri":GOOGLE_REDIRECT_URI,
+        "grant_type":"authorization_code"
+    })
+    tok["obtained_at"]=int(time.time())
+    set_setting("google_calendar_oauth",tok)
+    return tok
+
+def google_calendar_tokens():
+    tok=get_setting("google_calendar_oauth",{}) or {}
+    if not tok: return {}
+    # Refresh shortly before access-token expiry.
+    expires=int(tok.get("expires_in",3600) or 3600)
+    obtained=int(tok.get("obtained_at",0) or 0)
+    if tok.get("refresh_token") and (not tok.get("access_token") or time.time() >= obtained+expires-180):
+        refreshed=_google_token_request({
+            "client_id":GOOGLE_CLIENT_ID,
+            "client_secret":GOOGLE_CLIENT_SECRET,
+            "refresh_token":tok["refresh_token"],
+            "grant_type":"refresh_token"
+        })
+        tok.update(refreshed)
+        tok["obtained_at"]=int(time.time())
+        set_setting("google_calendar_oauth",tok)
+    return tok
+
+def google_calendar_connected():
+    return bool((get_setting("google_calendar_oauth",{}) or {}).get("refresh_token") or
+                (get_setting("google_calendar_oauth",{}) or {}).get("access_token"))
+
+def google_calendar_disconnect():
+    tok=get_setting("google_calendar_oauth",{}) or {}
+    access=tok.get("access_token") or tok.get("refresh_token")
+    if access:
+        try:
+            req=urllib.request.Request("https://oauth2.googleapis.com/revoke?"+urllib.parse.urlencode({"token":access}),method="POST")
+            urllib.request.urlopen(req,timeout=10).read()
+        except Exception:
+            pass
+    set_setting("google_calendar_oauth",{})
+    execute("DELETE FROM calendar_planning WHERE source='Google Calendar'")
+
+def google_calendar_sync(days_ahead=21):
+    tok=google_calendar_tokens()
+    access=tok.get("access_token")
+    if not access: raise RuntimeError("Google Calendar is not connected.")
+    now=datetime.utcnow()
+    end=now+timedelta(days=int(days_ahead))
+    params={
+        "timeMin":now.replace(microsecond=0).isoformat()+"Z",
+        "timeMax":end.replace(microsecond=0).isoformat()+"Z",
+        "singleEvents":"true",
+        "orderBy":"startTime",
+        "maxResults":"250"
+    }
+    url="https://www.googleapis.com/calendar/v3/calendars/primary/events?"+urllib.parse.urlencode(params)
+    req=urllib.request.Request(url,headers={"Authorization":"Bearer "+access})
+    with urllib.request.urlopen(req,timeout=20) as r:
+        data=json.loads(r.read().decode())
+    items=data.get("items",[])
+    execute("DELETE FROM calendar_planning WHERE source='Google Calendar'")
+    count=0
+    for ev in items:
+        start=ev.get("start",{})
+        endd=ev.get("end",{})
+        start_raw=start.get("dateTime") or start.get("date") or ""
+        end_raw=endd.get("dateTime") or endd.get("date") or ""
+        event_date=start_raw[:10] if start_raw else ""
+        start_time=start_raw[11:16] if "T" in start_raw else "All day"
+        end_time=end_raw[11:16] if "T" in end_raw else "All day"
+        title=ev.get("summary") or "(Untitled event)"
+        desc=(ev.get("description") or "").lower()
+        title_l=title.lower()
+        effect="Normal day"
+        if any(x in title_l+" "+desc for x in ["travel","flight","airport","hotel","trip"]):
+            effect="Travel / away from home"
+        elif any(x in title_l+" "+desc for x in ["dinner","lunch","brunch","restaurant","party","birthday","wedding"]):
+            effect="Meal away / social"
+        elif any(x in title_l+" "+desc for x in ["meeting","appointment","conference","training","class"]):
+            effect="Busy time block"
+        execute("""INSERT INTO calendar_planning(event_date,event_title,start_time,end_time,planning_effect,ignore_event,source)
+                   VALUES(?,?,?,?,?,?,?)""",
+                (event_date,title,start_time,end_time,effect,0,"Google Calendar"))
+        count+=1
+    set_setting("google_calendar_last_sync",datetime.now().isoformat(timespec="seconds"))
+    return count
+
+def process_google_calendar_callback():
+    if not GOOGLE_CAL_CONFIGURED: return
+    try:
+        qp=st.query_params
+        code=qp.get("code")
+        state=qp.get("state")
+        err=qp.get("error")
+    except Exception:
+        return
+    if err:
+        st.session_state["google_oauth_notice"]="Google Calendar connection was cancelled or denied."
+        try: st.query_params.clear()
+        except: pass
+        return
+    if code:
+        if not state or not _google_state_valid(state):
+            st.session_state["google_oauth_notice"]="Google Calendar connection failed because the security state could not be verified."
+        else:
+            try:
+                google_exchange_code(code)
+                n=google_calendar_sync(21)
+                st.session_state["google_oauth_notice"]=f"✅ Google Calendar connected. {n} upcoming event(s) imported."
+            except Exception as e:
+                st.session_state["google_oauth_notice"]="Google Calendar connection failed: "+str(e)
+        try: st.query_params.clear()
+        except: pass
+
+process_google_calendar_callback()
 
 # ---------- Helpers ----------
 def money(x):
@@ -557,7 +765,100 @@ def split_amounts(amount, method, custom=''):
         try:
             if part.strip(): vals.append(round(float(part.strip().replace('$','')),2))
         except: pass
-    return vals
+    return v
+def _google_sheet_export_url(url,fmt="xlsx"):
+    """Convert a normal Google Sheets share/edit URL into an export URL."""
+    u=(url or "").strip()
+    m=re.search(r"/spreadsheets/d/([^/]+)",u)
+    if not m:
+        raise ValueError("That does not look like a Google Sheets link.")
+    sheet_id=m.group(1)
+    gid=None
+    mg=re.search(r"(?:gid=|#gid=)(\d+)",u)
+    if mg: gid=mg.group(1)
+    out=f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format={fmt}"
+    if gid: out+=f"&gid={gid}"
+    return out
+
+def _read_finance_source(uploaded=None,sheet_url=""):
+    """Return dict of sheet_name -> dataframe from uploaded CSV/XLSX or accessible Google Sheet."""
+    if uploaded is not None:
+        name=(uploaded.name or "").lower()
+        raw=uploaded.getvalue()
+        if name.endswith(".csv"):
+            return {"CSV":pd.read_csv(io.BytesIO(raw))}
+        xl=pd.ExcelFile(io.BytesIO(raw))
+        return {s:pd.read_excel(io.BytesIO(raw),sheet_name=s) for s in xl.sheet_names}
+    if sheet_url.strip():
+        export=_google_sheet_export_url(sheet_url,"xlsx")
+        req=urllib.request.Request(export,headers={"User-Agent":"Mozilla/5.0"})
+        try:
+            with urllib.request.urlopen(req,timeout=25) as r:
+                raw=r.read()
+        except Exception as e:
+            raise RuntimeError("ChapLife could not read that Sheet. Make sure the link has viewer access, or download it as Excel/CSV and upload the file instead.") from e
+        xl=pd.ExcelFile(io.BytesIO(raw))
+        return {s:pd.read_excel(io.BytesIO(raw),sheet_name=s) for s in xl.sheet_names}
+    return {}
+
+def _coerce_money_series(s):
+    return pd.to_numeric(
+        s.astype(str).str.replace("$","",regex=False).str.replace(",","",regex=False).str.replace("(","-",regex=False).str.replace(")","",regex=False).str.strip(),
+        errors="coerce"
+    )
+
+def _coerce_date_series(s):
+    # Handles actual date cells plus common strings; numeric spreadsheet serial dates get a second pass.
+    d=pd.to_datetime(s,errors="coerce")
+    bad=d.isna()
+    if bad.any():
+        nums=pd.to_numeric(s,errors="coerce")
+        serial=nums.notna() & nums.between(20000,80000)
+        if serial.any():
+            d.loc[serial]=pd.Timestamp("1899-12-30")+pd.to_timedelta(nums.loc[serial],unit="D")
+    return d
+
+def paycheck_import_preview(df,date_col,actual_col,expected_col=None):
+    work=df.copy()
+    work["_pay_date"]=_coerce_date_series(work[date_col])
+    work["_actual"]=_coerce_money_series(work[actual_col])
+    if expected_col and expected_col!="None":
+        work["_expected"]=_coerce_money_series(work[expected_col])
+    else:
+        work["_expected"]=work["_actual"]
+    work=work[work["_pay_date"].notna() & work["_actual"].notna()].copy()
+    work["_pay_date"]=work["_pay_date"].dt.date
+    today=date.today()
+    future=work[work["_pay_date"]>today].sort_values("_pay_date")
+    historical=work[work["_pay_date"]<=today].sort_values("_pay_date",ascending=False)
+    # One row per paycheck date. If duplicates exist, keep the first visible mapped row.
+    historical=historical.drop_duplicates(subset=["_pay_date"],keep="first")
+    selected=historical.head(4).sort_values("_pay_date")
+    return selected,future,historical
+
+def import_recent_paychecks(selected,source_note="Imported finance sheet"):
+    imported=0; skipped=0
+    for _,r in selected.iterrows():
+        d=r["_pay_date"].isoformat()
+        actual=float(r["_actual"] or 0)
+        expected=float(r["_expected"] or actual or 0)
+        existing=rows("SELECT id FROM paychecks WHERE pay_date=?",(d,))
+        if existing:
+            skipped+=1
+            continue
+        execute("INSERT INTO paychecks(pay_date,expected,actual,note) VALUES(?,?,?,?)",
+                (d,expected,actual,source_note))
+        # Avoid duplicate Paycheck income transaction on same date/amount.
+        tx=rows("""SELECT id FROM finance_transactions
+                   WHERE tx_date=? AND tx_type='Income' AND category='Paycheck' AND ABS(amount-?)<0.01""",(d,actual or expected))
+        if not tx:
+            execute("""INSERT INTO finance_transactions(tx_date,amount,tx_type,category,subcategory,need_want,merchant,note)
+                       VALUES(?,?,?,?,?,?,?,?)""",
+                    (d,actual or expected,"Income","Paycheck","Imported","Income","Paycheck",source_note))
+        imported+=1
+    return imported,skipped
+
+als
 
 def finances():
     st.title('💰 Finances')
@@ -710,10 +1011,99 @@ def finances():
         delete_reset_panel('debts','debts','name')
 
     with tabs[7]:
-        st.caption('Import transaction history from CSV.'); up=st.file_uploader('Import CSV',type=['csv'])
-        if up: st.dataframe(pd.read_csv(up).head(),use_container_width=True)
+        st.subheader('📥 Import Finance Sheet')
+        st.info('Paycheck rule: ChapLife will import **only the most recent paycheck on or before today plus the 3 paycheck dates immediately before it**. Any future dates in your planning sheet are excluded from actual income.')
+        source_type=st.radio('Import from',['Google Sheets link','Upload Excel / CSV'],horizontal=True,key='finance_import_source')
+
+        sheet_url=''
+        uploaded=None
+        if source_type=='Google Sheets link':
+            sheet_url=st.text_input('Google Sheets share link',placeholder='https://docs.google.com/spreadsheets/d/.../edit',key='finance_sheet_url')
+            st.caption('The Sheet must be viewable by the account/link being used. If Google blocks export, download it as .xlsx or .csv and use Upload instead.')
+        else:
+            uploaded=st.file_uploader('Upload Excel or CSV',type=['xlsx','xls','csv'],key='finance_sheet_upload')
+
+        load=st.button('Read sheet',use_container_width=True,key='read_finance_sheet')
+        if load:
+            try:
+                book=_read_finance_source(uploaded,sheet_url)
+                st.session_state['finance_import_book']={k:v.to_json(orient='split',date_format='iso') for k,v in book.items()}
+                st.success(f'Read {len(book)} sheet/tab(s).')
+            except Exception as e:
+                st.error(str(e))
+
+        rawbook=st.session_state.get('finance_import_book',{})
+        if rawbook:
+            book={k:pd.read_json(io.StringIO(v),orient='split') for k,v in rawbook.items()}
+            sheet_name=st.selectbox('Sheet / tab',list(book.keys()),key='finance_import_sheet_name')
+            df=book[sheet_name].copy()
+            # Drop fully blank columns but preserve the original visible names.
+            df=df.dropna(axis=1,how='all')
+            st.markdown('#### Sheet preview')
+            st.dataframe(df.head(20),use_container_width=True,hide_index=True)
+
+            cols=[str(c) for c in df.columns]
+            if cols:
+                likely_date=next((c for c in cols if any(x in c.lower() for x in ['pay date','payday','pay day','date'])),cols[0])
+                money_candidates=[c for c in cols if any(x in c.lower() for x in ['actual','net','pay','amount','deposit'])]
+                likely_actual=money_candidates[0] if money_candidates else cols[min(1,len(cols)-1)]
+
+                st.markdown('#### Tell ChapLife which columns are your paycheck data')
+                c=st.columns(3)
+                date_col=c[0].selectbox('Paycheck date column',cols,index=cols.index(likely_date),key='map_paydate')
+                actual_col=c[1].selectbox('Actual / net paycheck column',cols,index=cols.index(likely_actual),key='map_actual')
+                expected_options=['None']+cols
+                expected_col=c[2].selectbox('Expected paycheck column (optional)',expected_options,key='map_expected')
+
+                try:
+                    selected,future,historical=paycheck_import_preview(df,date_col,actual_col,expected_col)
+                    st.markdown('#### ✅ What ChapLife WILL import')
+                    if selected.empty:
+                        st.warning('I could not find any valid paycheck rows on or before today with that column mapping.')
+                    else:
+                        show=selected[["_pay_date","_expected","_actual"]].copy()
+                        show.columns=["Pay date","Expected","Actual / net"]
+                        st.dataframe(show,use_container_width=True,hide_index=True)
+                        st.caption(f'Newest eligible paycheck: {selected["_pay_date"].max()} · {len(selected)} historical paycheck(s) selected.')
+
+                    st.markdown('#### ⏭️ Future planning dates ChapLife WILL NOT import')
+                    if future.empty:
+                        st.success('No future-dated paycheck rows found.')
+                    else:
+                        fshow=future[["_pay_date","_expected","_actual"]].copy()
+                        fshow.columns=["Future pay date","Expected","Planned / entered amount"]
+                        st.dataframe(fshow.head(20),use_container_width=True,hide_index=True)
+                        st.caption(f'{len(future)} future-dated row(s) excluded because those dates are after {date.today().isoformat()}.')
+
+                    if not selected.empty:
+                        c=st.columns(2)
+                        confirm=c[0].checkbox('I reviewed the 4 paycheck dates above',key='confirm_recent_pay_import')
+                        if c[1].button('Import these paycheck dates',disabled=not confirm,use_container_width=True,key='do_recent_pay_import'):
+                            imported,skipped=import_recent_paychecks(selected,f'Imported from {sheet_name}')
+                            st.success(f'Imported {imported} paycheck(s). {skipped} already existed and were skipped.')
+                            st.session_state.pop('finance_import_book',None)
+                            st.rerun()
+                except Exception as e:
+                    st.warning('Check the column choices above. '+str(e))
+
+        st.divider()
+        st.subheader('📊 Recent-paycheck snapshot')
+        recent=df_from("SELECT pay_date,expected,actual,note FROM paychecks WHERE pay_date<=? ORDER BY pay_date DESC LIMIT 4",(date.today().isoformat(),))
+        if recent.empty:
+            st.info('Import or add paychecks to build your planning baseline.')
+        else:
+            st.dataframe(recent,use_container_width=True,hide_index=True)
+            vals=recent.actual.where(recent.actual>0,recent.expected).dropna()
+            if not vals.empty:
+                c=st.columns(3)
+                c[0].metric('Average of recent checks',money(vals.mean()))
+                c[1].metric('Lowest recent check',money(vals.min()))
+                c[2].metric('Highest recent check',money(vals.max()))
+                st.caption('ChapLife can use these actual historical checks as a reality check when you plan future bills and savings; future-dated spreadsheet rows are not treated as received income.')
+
         tx=df_from('SELECT * FROM finance_transactions ORDER BY tx_date')
-        if not tx.empty: st.download_button('Download transactions CSV',tx.to_csv(index=False).encode(),'chaplife_transactions.csv','text/csv')
+        if not tx.empty:
+            st.download_button('Download transactions CSV',tx.to_csv(index=False).encode(),'chaplife_transactions.csv','text/csv')
 
 # ---------- Meals / recipes ----------
 MEALS=[
@@ -3193,9 +3583,40 @@ def settings_page():
 
     with tabs[1]:
         st.subheader('📅 Google Calendar')
-        st.warning('Calendar is not connected directly to this hosted ChapLife app yet.')
-        st.write('Your Google Calendar connection in ChatGPT is separate from ChapLife. ChapLife needs its **own secure Google sign-in/OAuth connection** before it can read your schedule automatically.')
-        st.markdown('**Once connected, ChapLife will be allowed to use calendar events for:**')
+        if st.session_state.get("google_oauth_notice"):
+            notice=st.session_state.pop("google_oauth_notice")
+            st.success(notice) if notice.startswith("✅") else st.warning(notice)
+
+        if not GOOGLE_CAL_CONFIGURED:
+            st.error('Google OAuth is not configured yet.')
+            st.write('Add `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, and `GOOGLE_REDIRECT_URI` to Streamlit Secrets after creating the Google OAuth web client.')
+        elif not google_calendar_connected():
+            st.write('Connect your Google Calendar so ChapLife can read upcoming events and use them for meal/workout planning.')
+            st.link_button('🔗 Connect Google Calendar',google_auth_url(),use_container_width=True)
+            st.caption('ChapLife requests **read-only Calendar access**. It cannot create, edit, or delete Google Calendar events.')
+        else:
+            c=st.columns(3)
+            c[0].success('✅ Google Calendar connected')
+            last=get_setting("google_calendar_last_sync","Never")
+            c[1].metric('Last calendar sync',str(last).replace('T',' ')[:19])
+            horizon=c[2].selectbox('Import horizon',[7,14,21,30,60],index=2,format_func=lambda x:f'{x} days')
+            a,b=st.columns(2)
+            if a.button('↻ Sync Google Calendar now',use_container_width=True,key='google_sync_now'):
+                try:
+                    n=google_calendar_sync(horizon); st.success(f'{n} upcoming event(s) imported.'); st.rerun()
+                except Exception as e: st.error(str(e))
+            if b.button('Disconnect Google Calendar',use_container_width=True,key='google_disconnect'):
+                google_calendar_disconnect(); st.rerun()
+
+            events=df_from("SELECT * FROM calendar_planning WHERE source='Google Calendar' ORDER BY event_date,start_time")
+            st.markdown('#### Upcoming imported events')
+            if events.empty:
+                st.info('No upcoming events are currently imported.')
+            else:
+                st.dataframe(events[['event_date','event_title','start_time','end_time','planning_effect']],use_container_width=True,hide_index=True)
+
+        st.divider()
+        st.markdown('**How ChapLife should use calendar events:**')
         use_meals=st.toggle('Adjust meal plans around busy days',value=bool(get_setting('calendar_meal_planning',True)),key='calmeal')
         use_workouts=st.toggle('Adjust workout length/timing around events',value=bool(get_setting('calendar_workout_planning',True)),key='calwork')
         away=st.toggle('Flag days when I may need a meal away from home',value=bool(get_setting('calendar_away_meals',True)),key='calaway')
@@ -3206,7 +3627,6 @@ def settings_page():
             set_setting('calendar_away_meals',away)
             set_setting('calendar_travel_buffer',travel)
             st.success('Calendar planning preferences saved.')
-        st.info('Next cloud step: add a **Connect Google Calendar** button here using Google OAuth. No Google password will be stored in ChapLife.')
 
     with tabs[2]:
         st.subheader('🥗 Meal planning preferences')
@@ -3239,6 +3659,7 @@ def settings_page():
     with tabs[5]:
         st.subheader('Data & privacy')
         st.success('☁️ Private Supabase sync is active for your signed-in ChapLife account.')
+        st.info('🔄 Automatic sync runs every **2 minutes** while ChapLife is open. Saves also continue syncing after normal app changes, and the manual Sync button remains available.')
         st.write('The app code remains on GitHub, while your ChapLife database is stored as private per-user cloud state protected by Supabase authentication and Row Level Security.')
         st.warning('Do not upload `chaplife.db`, financial exports, health screenshots, medicine-label photos, passwords, or API credentials to the public GitHub repository.')
         st.caption(f"Last sync: {st.session_state.get('_cloud_last_sync','this session')}")
