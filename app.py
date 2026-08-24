@@ -11,7 +11,7 @@ DB_PATH = APP_DIR / 'chaplife.db'
 
 st.set_page_config(page_title='ChapLife', page_icon='✨', layout='wide', initial_sidebar_state='collapsed')
 
-BUILD_VERSION='ChapLife Cloud v5.3.1'
+BUILD_VERSION='ChapLife Cloud v5.3.2'
 
 st.markdown('''
 <style>
@@ -323,7 +323,7 @@ if hasattr(st, "fragment"):
             cloud_push_db()
             st.session_state["_cloud_last_sync"]=datetime.now().strftime("%I:%M:%S %p")
             # Calendar is less volatile than app state; refresh about every 15 minutes.
-            if GOOGLE_CAL_CONFIGURED and google_calendar_connected():
+            if globals().get("GOOGLE_CAL_CONFIGURED", False) and callable(globals().get("google_calendar_connected")) and google_calendar_connected():
                 last_auto=float(st.session_state.get("_google_auto_sync_epoch",0) or 0)
                 if time.time()-last_auto>=900:
                     try:
