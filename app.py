@@ -11,7 +11,7 @@ DB_PATH = APP_DIR / 'chaplife.db'
 
 st.set_page_config(page_title='ChapLife', page_icon='✨', layout='wide', initial_sidebar_state='collapsed')
 
-BUILD_VERSION='ChapLife Cloud v6.1.1'
+BUILD_VERSION='ChapLife Cloud v6.1.2'
 
 st.markdown('''
 <style>
@@ -254,7 +254,7 @@ def cloud_push_db():
     except Exception:
         pass
     blob=base64.b64encode(DB_PATH.read_bytes()).decode("ascii")
-    payload={"user_id":uid,"db_blob":blob,"updated_at":datetime.utcnow().isoformat()+"Z"}
+    payload={"user_id":uid,"db_blob":blob,"updated_at":datetime.now().astimezone().astimezone().isoformat()}
     url=f"{SUPABASE_URL}/rest/v1/chaplife_state?on_conflict=user_id"
     _http_json(url,"POST",payload,token,{"Prefer":"resolution=merge-duplicates,return=minimal"})
     st.session_state["_cloud_last_sync"]="just now"
@@ -1151,8 +1151,8 @@ def finances():
                 bl=float(current[0]["balance_limit"] or 0) if current else 0
                 pl=float(current[0]["paycheck_limit"] or 0) if current else 0
                 c=st.columns(3)
-                newbl=c[0].number_input(f"{provider} · max total balance",min_value=0.0,value=bl,step=25.0,key=f"{provider}_balance_limit")
-                newpl=c[1].number_input(f"{provider} · max from one paycheck",min_value=0.0,value=pl,step=10.0,key=f"{provider}_paycheck_limit")
+                newbl=c[0].number_input(f"{provider} · max total balance",min_value=0.0,value=float(bl),step=25.0,key=f"{provider}_balance_limit")
+                newpl=c[1].number_input(f"{provider} · max from one paycheck",min_value=0.0,value=float(pl),step=10.0,key=f"{provider}_paycheck_limit")
                 if c[2].button(f"Save {provider} limits",key=f"save_{provider}_limits"):
                     execute("""INSERT INTO finance_limits(provider,balance_limit,paycheck_limit) VALUES(?,?,?)
                                ON CONFLICT(provider) DO UPDATE SET balance_limit=excluded.balance_limit,paycheck_limit=excluded.paycheck_limit""",
