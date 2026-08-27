@@ -11,7 +11,7 @@ DB_PATH = APP_DIR / 'chaplife.db'
 
 st.set_page_config(page_title='ChapLife', page_icon='✨', layout='wide', initial_sidebar_state='collapsed')
 
-BUILD_VERSION='ChapLife Cloud v6.1'
+BUILD_VERSION='ChapLife Cloud v6.1.1'
 
 st.markdown('''
 <style>
@@ -4417,6 +4417,26 @@ def progress():
         st.write(f"**Medicine/supplement doses logged:** {len(doses)}")
         st.write(f"**Cycle entries logged:** {len(cycles)}")
 
+
+def friendly_app_error(section="this section"):
+    """Never expose raw Python/Streamlit tracebacks to the normal ChapLife screen."""
+    import traceback
+    err=traceback.format_exc()
+    # Log full details to Streamlit Cloud logs only.
+    try:
+        print(f"[ChapLife error · {section}]\n{err}")
+    except Exception:
+        pass
+    st.error(f"Something in {section} didn’t load correctly.")
+    st.write("Your saved data is still protected.")
+    st.caption("Technical details are hidden from normal view.")
+    c=st.columns(2)
+    if c[0].button("↻ Try again",use_container_width=True,key=f"friendly_retry_{re.sub(r'[^a-z0-9]+','_',str(section).lower())}"):
+        st.rerun()
+    if c[1].button("🏠 Go Home",use_container_width=True,key=f"friendly_home_{re.sub(r'[^a-z0-9]+','_',str(section).lower())}"):
+        st.session_state.page="Home"
+        st.rerun()
+
 # ---------- Render ----------
 page=st.session_state.page
 if page=='Growth Lab' and not bool(get_setting('show_growth_section',False)):
@@ -4442,4 +4462,16 @@ _renderers={
 try:
     _renderers.get(page,home)()
 except Exception:
-    friendly_app_error(page)
+    try:
+        friendly_app_error(page)
+    except Exception as fallback_error:
+        # Absolute last resort: no traceback on user screen.
+        try:
+            import traceback
+            print("[ChapLife fallback error]\n"+traceback.format_exc())
+        except Exception:
+            pass
+        st.error("Something didn’t load correctly.")
+        if st.button("🏠 Return Home",use_container_width=True,key="absolute_home"):
+            st.session_state.page="Home"
+            st.rerun()
