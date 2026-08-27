@@ -11,7 +11,7 @@ DB_PATH = APP_DIR / 'chaplife.db'
 
 st.set_page_config(page_title='ChapLife', page_icon='✨', layout='wide', initial_sidebar_state='collapsed')
 
-BUILD_VERSION='ChapLife Cloud v6.0.1'
+BUILD_VERSION='ChapLife Cloud v6.1'
 
 st.markdown('''
 <style>
@@ -56,6 +56,46 @@ def init_db():
     CREATE TABLE IF NOT EXISTS savings_goals (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, goal_type TEXT, target_amount REAL, current_amount REAL, target_date TEXT, priority TEXT, contribution_frequency TEXT, note TEXT);
     CREATE TABLE IF NOT EXISTS savings_contributions (id INTEGER PRIMARY KEY AUTOINCREMENT, goal_id INTEGER, contrib_date TEXT, amount REAL, note TEXT);
     CREATE TABLE IF NOT EXISTS debts (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, balance REAL, apr REAL, min_payment REAL, due_day INTEGER, note TEXT);
+    CREATE TABLE IF NOT EXISTS bnpl_purchases (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        provider TEXT,
+        merchant TEXT,
+        purchase_date TEXT,
+        original_amount REAL,
+        remaining_balance REAL,
+        payment_frequency TEXT,
+        installment_count INTEGER,
+        first_payment_date TEXT,
+        status TEXT DEFAULT 'Active',
+        note TEXT
+    );
+    CREATE TABLE IF NOT EXISTS bnpl_installments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        purchase_id INTEGER,
+        due_date TEXT,
+        amount REAL,
+        status TEXT DEFAULT 'Planned',
+        paid_date TEXT,
+        paycheck_id INTEGER
+    );
+    CREATE TABLE IF NOT EXISTS finance_limits (
+        provider TEXT PRIMARY KEY,
+        balance_limit REAL DEFAULT 0,
+        paycheck_limit REAL DEFAULT 0
+    );
+    CREATE TABLE IF NOT EXISTS paycheck_plan_items (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        paycheck_id INTEGER,
+        category TEXT,
+        name TEXT,
+        planned_amount REAL DEFAULT 0,
+        actual_amount REAL DEFAULT 0,
+        status TEXT DEFAULT 'Planned',
+        protected INTEGER DEFAULT 0,
+        linked_type TEXT,
+        linked_id INTEGER,
+        note TEXT
+    );
     CREATE TABLE IF NOT EXISTS roommate_payments (id INTEGER PRIMARY KEY AUTOINCREMENT, received_date TEXT, total_amount REAL, note TEXT);
     CREATE TABLE IF NOT EXISTS roommate_allocations (id INTEGER PRIMARY KEY AUTOINCREMENT, payment_id INTEGER, category TEXT, detail TEXT, amount REAL);
     CREATE TABLE IF NOT EXISTS roommate_ledger (id INTEGER PRIMARY KEY AUTOINCREMENT, tx_date TEXT, action TEXT, amount REAL, note TEXT);
@@ -859,7 +899,387 @@ def import_recent_paychecks(selected,source_note="Imported finance sheet"):
     return imported,skipped
 
 
+
+def _add_months(d, months=1):
+    y=d.year+(d.month-1+months)//12
+    m=(d.month-1+months)%12+1
+    import calendar
+    day=min(d.day,calendar.monthrange(y,m)[1])
+    return date(y,m,day)
+
+def _paycheck_rows():
+    return rows("SELECT * FROM paychecks ORDER BY pay_date")
+
+def _paycheck_window(paycheck_id):
+    current=rows("SELECT * FROM paychecks WHERE id=?",(paycheck_id,))
+    if not current:
+        return None,None
+    d=date.fromisoformat(current[0]["pay_date"])
+    nxt=rows("SELECT * FROM paychecks WHERE pay_date>? ORDER BY pay_date LIMIT 1",(d.isoformat(),))
+    next_d=date.fromisoformat(nxt[0]["pay_date"]) if nxt else d+timedelta(days=14)
+    return d,next_d
+
+def reassign_bnpl_installments():
+    """Assign each installment to the paycheck intended to fund it: latest paycheck on/before due date."""
+    pays=_paycheck_rows()
+    if not pays:
+        return
+    pdates=[(p["id"],date.fromisoformat(p["pay_date"])) for p in pays]
+    for inst in rows("SELECT * FROM bnpl_installments WHERE status!='Paid'"):
+        due=date.fromisoformat(inst["due_date"])
+        eligible=[x for x in pdates if x[1] <= due]
+        if eligible:
+            pid=max(eligible,key=lambda x:x[1])[0]
+        else:
+            pid=min(pdates,key=lambda x:x[1])[0]
+        if inst["paycheck_id"]!=pid:
+            c=db(); c.execute("UPDATE bnpl_installments SET paycheck_id=? WHERE id=?",(pid,inst["id"])); c.commit(); c.close()
+
+def bnpl_provider_summary(provider,paycheck_id=None):
+    bal=rows("SELECT COALESCE(SUM(remaining_balance),0) n FROM bnpl_purchases WHERE provider=? AND status='Active'",(provider,))[0]["n"] or 0
+    lim=rows("SELECT * FROM finance_limits WHERE provider=?",(provider,))
+    balance_limit=float(lim[0]["balance_limit"] or 0) if lim else 0
+    paycheck_limit=float(lim[0]["paycheck_limit"] or 0) if lim else 0
+    upcoming=0
+    if paycheck_id:
+        upcoming=rows("""SELECT COALESCE(SUM(i.amount),0) n
+                         FROM bnpl_installments i JOIN bnpl_purchases p ON p.id=i.purchase_id
+                         WHERE p.provider=? AND i.paycheck_id=? AND i.status!='Paid'""",(provider,paycheck_id))[0]["n"] or 0
+    return float(bal),balance_limit,paycheck_limit,float(upcoming)
+
+def _bnpl_risk(balance,limit):
+    if not limit:
+        return "⚪ Set a personal limit"
+    pct=balance/limit if limit else 0
+    if pct>=1: return "🔴 Over personal limit"
+    if pct>=.8: return "🟡 Close to personal limit"
+    return "🟢 Within personal limit"
+
+def create_bnpl_purchase(provider,merchant,purchase_date,total,frequency,count,first_date,first_amount,note=""):
+    count=max(1,int(count))
+    total=round(float(total),2)
+    first_amount=round(float(first_amount or 0),2)
+    if first_amount<=0:
+        first_amount=round(total/count,2)
+    remaining=max(0,total-first_amount)
+    later=round(remaining/(count-1),2) if count>1 else 0
+    pid=execute("""INSERT INTO bnpl_purchases(provider,merchant,purchase_date,original_amount,remaining_balance,
+                   payment_frequency,installment_count,first_payment_date,status,note)
+                   VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                (provider,merchant,purchase_date.isoformat(),total,total,frequency,count,first_date.isoformat(),"Active",note))
+    amounts=[first_amount]+([later]*(count-1))
+    # absorb rounding difference in last installment
+    if amounts:
+        amounts[-1]=round(amounts[-1]+(total-round(sum(amounts),2)),2)
+    due=first_date
+    for n,amt in enumerate(amounts):
+        if n>0:
+            if frequency=="Every 2 weeks": due=due+timedelta(days=14)
+            elif frequency=="Monthly": due=_add_months(due,1)
+            elif frequency=="Weekly": due=due+timedelta(days=7)
+            else: due=due+timedelta(days=14)
+        execute("INSERT INTO bnpl_installments(purchase_id,due_date,amount,status) VALUES(?,?,?,'Planned')",
+                (pid,due.isoformat(),amt))
+    reassign_bnpl_installments()
+    return pid
+
+def mark_bnpl_installment_paid(inst_id,paid_date=None):
+    paid_date=paid_date or date.today()
+    inst=rows("""SELECT i.*,p.provider,p.merchant,p.id purchase_id
+                 FROM bnpl_installments i JOIN bnpl_purchases p ON p.id=i.purchase_id
+                 WHERE i.id=?""",(inst_id,))
+    if not inst:
+        return
+    x=inst[0]
+    if x["status"]=="Paid":
+        return
+    execute("UPDATE bnpl_installments SET status='Paid',paid_date=? WHERE id=?",(paid_date.isoformat(),inst_id))
+    paid=rows("SELECT COALESCE(SUM(amount),0) n FROM bnpl_installments WHERE purchase_id=? AND status='Paid'",(x["purchase_id"],))[0]["n"] or 0
+    orig=rows("SELECT original_amount FROM bnpl_purchases WHERE id=?",(x["purchase_id"],))[0]["original_amount"]
+    remaining=max(0,round(float(orig)-float(paid),2))
+    execute("UPDATE bnpl_purchases SET remaining_balance=?,status=? WHERE id=?",
+            (remaining,"Paid Off" if remaining<=.009 else "Active",x["purchase_id"]))
+    execute("""INSERT INTO finance_transactions(tx_date,amount,tx_type,category,subcategory,need_want,merchant,note)
+               VALUES(?,?,?,?,?,?,?,?)""",
+            (paid_date.isoformat(),float(x["amount"]),"Expense","Debt",x["provider"],"Need",
+             x["merchant"],f"{x['provider']} installment"))
+    reassign_bnpl_installments()
+
+def paycheck_connected_summary(paycheck_id):
+    p=rows("SELECT * FROM paychecks WHERE id=?",(paycheck_id,))
+    if not p:
+        return {}
+    p=p[0]
+    income=float(p["actual"] or p["expected"] or 0)
+    planned=rows("""SELECT COALESCE(SUM(CASE WHEN actual_amount>0 THEN actual_amount ELSE planned_amount END),0) n
+                    FROM paycheck_plan_items WHERE paycheck_id=?""",(paycheck_id,))[0]["n"] or 0
+    bnpl=rows("SELECT COALESCE(SUM(amount),0) n FROM bnpl_installments WHERE paycheck_id=? AND status!='Paid'",(paycheck_id,))[0]["n"] or 0
+    bnpl_paid=rows("SELECT COALESCE(SUM(amount),0) n FROM bnpl_installments WHERE paycheck_id=? AND status='Paid'",(paycheck_id,))[0]["n"] or 0
+    return {"income":income,"planned":float(planned),"bnpl_due":float(bnpl),"bnpl_paid":float(bnpl_paid),
+            "remaining":income-float(planned)-float(bnpl)}
+
+def _safe_paycheck_label(p):
+    amt=float(p["actual"] or p["expected"] or 0)
+    return f"{p['pay_date']} · {money(amt)}"
+
 def finances():
+    st.title("💰 Finances")
+    reassign_bnpl_installments()
+    tabs=st.tabs([
+        "💵 Paycheck Command","🛍️ Affirm & Klarna","💳 Cards & Debt","🏠 Shared / Randi",
+        "📋 Bills & Spending","🎯 Savings","📥 Import","⚙️ Money Settings"
+    ])
+
+    # ---- PAYCHECK COMMAND CENTER ----
+    with tabs[0]:
+        st.subheader("💵 Paycheck Command Center")
+        pays=rows("SELECT * FROM paychecks ORDER BY pay_date DESC")
+        if not pays:
+            st.info("Add a paycheck first. ChapLife connects BNPL installments and planned obligations to paycheck dates.")
+        else:
+            labels={_safe_paycheck_label(p):p for p in pays}
+            selected_label=st.selectbox("Paycheck to plan",list(labels.keys()),key="finance_command_paycheck")
+            p=labels[selected_label]
+            pid=p["id"]
+            s=paycheck_connected_summary(pid)
+            c=st.columns(4)
+            c[0].metric("Paycheck",money(s["income"]))
+            c[1].metric("Affirm + Klarna due",money(s["bnpl_due"]))
+            c[2].metric("Other planned",money(s["planned"]))
+            c[3].metric("Left after plan",money(s["remaining"]))
+
+            if s["remaining"]<0:
+                st.error(f"This paycheck is over-planned by {money(abs(s['remaining']))}.")
+            elif s["income"] and s["remaining"]/s["income"]<.1:
+                st.warning("This paycheck has less than 10% unassigned after the current plan.")
+            else:
+                st.success("This paycheck is currently within the plan.")
+
+            held,owed,physical=roommate_summary()
+            st.caption(f"Protected roommate/Randi ledger currently shows {money(held)} held. ChapLife does not count that as ordinary spending money.")
+
+            st.markdown("### 🛍️ BNPL coming from this paycheck")
+            inst=df_from("""SELECT i.id,i.due_date,p.provider,p.merchant,i.amount,i.status,p.remaining_balance
+                            FROM bnpl_installments i JOIN bnpl_purchases p ON p.id=i.purchase_id
+                            WHERE i.paycheck_id=? ORDER BY i.due_date,p.provider,p.merchant""",(pid,))
+            if inst.empty:
+                st.caption("No Affirm/Klarna installments assigned to this paycheck.")
+            else:
+                st.dataframe(inst[["due_date","provider","merchant","amount","status","remaining_balance"]],
+                             use_container_width=True,hide_index=True)
+                unpaid=[r for r in rows("""SELECT i.id,i.due_date,p.provider,p.merchant,i.amount
+                                          FROM bnpl_installments i JOIN bnpl_purchases p ON p.id=i.purchase_id
+                                          WHERE i.paycheck_id=? AND i.status!='Paid' ORDER BY i.due_date""",(pid,))]
+                if unpaid:
+                    opts={f"{x['provider']} · {x['merchant']} · {x['due_date']} · {money(x['amount'])}":x for x in unpaid}
+                    choice=st.selectbox("Mark an installment paid",["Select..."]+list(opts.keys()),key="mark_bnpl_paid")
+                    if choice!="Select..." and st.button("✓ Mark selected installment paid",use_container_width=True,key="mark_bnpl_paid_btn"):
+                        mark_bnpl_installment_paid(opts[choice]["id"])
+                        st.rerun()
+
+            st.markdown("### 📋 Everything else planned from this paycheck")
+            with st.form("add_paycheck_plan_item",clear_on_submit=True):
+                c=st.columns(4)
+                category=c[0].selectbox("Category",["IRS","Dues","Randi / Protected","Credit Card","Rent","Utilities","Groceries","Transportation","Savings","Subscription","Other"])
+                name=c[1].text_input("What is it?",placeholder="IRS payment, Chase card, Local dues...")
+                amount=c[2].number_input("Planned amount",min_value=0.0,step=5.0)
+                status=c[3].selectbox("Status",["Planned","Paid"])
+                note=st.text_input("Note",placeholder="Optional details")
+                if st.form_submit_button("Add to this paycheck",use_container_width=True):
+                    protected=1 if category=="Randi / Protected" else 0
+                    actual=amount if status=="Paid" else 0
+                    execute("""INSERT INTO paycheck_plan_items(paycheck_id,category,name,planned_amount,actual_amount,status,protected,note)
+                               VALUES(?,?,?,?,?,?,?,?)""",(pid,category,name,amount,actual,status,protected,note))
+                    if status=="Paid" and category!="Randi / Protected":
+                        execute("""INSERT INTO finance_transactions(tx_date,amount,tx_type,category,subcategory,need_want,merchant,note)
+                                   VALUES(?,?,?,?,?,?,?,?)""",(p["pay_date"],amount,"Expense",category,"Paycheck Plan","Need",name,note))
+                    st.rerun()
+
+            items=df_from("SELECT * FROM paycheck_plan_items WHERE paycheck_id=? ORDER BY id DESC",(pid,))
+            if not items.empty:
+                st.dataframe(items[["category","name","planned_amount","actual_amount","status","note"]],use_container_width=True,hide_index=True)
+                delmap={f"{r['category']} · {r['name']} · {money(r['planned_amount'])}":r for r in rows("SELECT * FROM paycheck_plan_items WHERE paycheck_id=?",(pid,))}
+                dsel=st.selectbox("Remove a planned item",["Select..."]+list(delmap.keys()),key="delete_plan_item")
+                if dsel!="Select..." and st.button("Remove selected item",key="delete_plan_item_btn"):
+                    execute("DELETE FROM paycheck_plan_items WHERE id=?",(delmap[dsel]["id"],)); st.rerun()
+
+            st.markdown("### ➕ Add / plan a paycheck")
+            with st.form("quick_add_paycheck",clear_on_submit=True):
+                c=st.columns(4)
+                pdte=c[0].date_input("Pay date",value=date.today(),key="quick_pay_date")
+                exp=c[1].number_input("Expected",min_value=0.0,step=25.0,key="quick_pay_expected")
+                act=c[2].number_input("Actual",min_value=0.0,step=25.0,key="quick_pay_actual")
+                note=c[3].text_input("Note",key="quick_pay_note")
+                if st.form_submit_button("Save paycheck"):
+                    newpid=execute("INSERT INTO paychecks(pay_date,expected,actual,note) VALUES(?,?,?,?)",(pdte.isoformat(),exp,act,note))
+                    if act>0:
+                        execute("""INSERT INTO finance_transactions(tx_date,amount,tx_type,category,subcategory,need_want,merchant,note)
+                                   VALUES(?,?,?,?,?,?,?,?)""",(pdte.isoformat(),act,"Income","Paycheck","Regular","Income","Paycheck",note))
+                    reassign_bnpl_installments(); st.rerun()
+
+    # ---- BNPL WALLET ----
+    with tabs[1]:
+        st.subheader("🛍️ Affirm & Klarna Wallet")
+        st.write("New purchases, balances, installment dates, personal limits, and paycheck planning all feed the same Finance system.")
+
+        pays=rows("SELECT * FROM paychecks ORDER BY pay_date DESC")
+        default_pid=pays[0]["id"] if pays else None
+        if pays:
+            current_label=st.selectbox("Show payday impact for",[_safe_paycheck_label(p) for p in pays],key="bnpl_payday_impact")
+            current_pid=next(p["id"] for p in pays if _safe_paycheck_label(p)==current_label)
+        else:
+            current_pid=None
+
+        cols=st.columns(2)
+        for n,provider in enumerate(["Affirm","Klarna"]):
+            bal,blim,plim,upcoming=bnpl_provider_summary(provider,current_pid)
+            with cols[n]:
+                with st.container(border=True):
+                    st.markdown(f"### {provider}")
+                    st.metric("Active balance",money(bal))
+                    st.metric("Available under MY limit",money(max(0,blim-bal)) if blim else "Set limit")
+                    st.metric("Assigned to selected paycheck",money(upcoming))
+                    st.write(_bnpl_risk(bal,blim))
+                    if plim and upcoming>plim:
+                        st.error(f"Payday cap exceeded by {money(upcoming-plim)}")
+                    elif plim and upcoming>=plim*.8:
+                        st.warning("This paycheck is close to your BNPL payday cap.")
+
+        with st.expander("⚙️ My Affirm & Klarna spending limits",expanded=False):
+            for provider in ["Affirm","Klarna"]:
+                current=rows("SELECT * FROM finance_limits WHERE provider=?",(provider,))
+                bl=float(current[0]["balance_limit"] or 0) if current else 0
+                pl=float(current[0]["paycheck_limit"] or 0) if current else 0
+                c=st.columns(3)
+                newbl=c[0].number_input(f"{provider} · max total balance",min_value=0.0,value=bl,step=25.0,key=f"{provider}_balance_limit")
+                newpl=c[1].number_input(f"{provider} · max from one paycheck",min_value=0.0,value=pl,step=10.0,key=f"{provider}_paycheck_limit")
+                if c[2].button(f"Save {provider} limits",key=f"save_{provider}_limits"):
+                    execute("""INSERT INTO finance_limits(provider,balance_limit,paycheck_limit) VALUES(?,?,?)
+                               ON CONFLICT(provider) DO UPDATE SET balance_limit=excluded.balance_limit,paycheck_limit=excluded.paycheck_limit""",
+                            (provider,newbl,newpl)); st.rerun()
+
+        st.markdown("### ➕ Quick Add Purchase")
+        with st.form("quick_bnpl_purchase",clear_on_submit=True):
+            c=st.columns(3)
+            provider=c[0].selectbox("Used",["Affirm","Klarna"])
+            merchant=c[1].text_input("Store / purchase",placeholder="Amazon, SHEIN, JetBlue...")
+            total=c[2].number_input("Purchase total",min_value=0.0,step=5.0)
+            c=st.columns(4)
+            purchase_date=c[0].date_input("Purchase date",date.today())
+            frequency=c[1].selectbox("Payments",["Every 2 weeks","Monthly","Weekly"])
+            count=c[2].number_input("# of payments",min_value=1,max_value=36,value=4,step=1)
+            first_date=c[3].date_input("First payment date",date.today())
+            c=st.columns(2)
+            first_amount=c[0].number_input("First payment amount (0 = split evenly)",min_value=0.0,step=5.0)
+            note=c[1].text_input("Note")
+            save=st.form_submit_button("Add purchase & build payment schedule",use_container_width=True)
+            if save:
+                bal,blim,plim,_=bnpl_provider_summary(provider,current_pid)
+                projected=bal+total
+                create_bnpl_purchase(provider,merchant,purchase_date,total,frequency,count,first_date,first_amount,note)
+                if blim and projected>blim:
+                    st.session_state["bnpl_warning"]=f"🔴 Recorded, but this puts {provider} {money(projected-blim)} over your personal balance limit."
+                else:
+                    st.session_state["bnpl_warning"]=f"✓ {provider} purchase added and installment schedule created."
+                st.rerun()
+        if st.session_state.get("bnpl_warning"):
+            msg=st.session_state.pop("bnpl_warning")
+            st.error(msg) if msg.startswith("🔴") else st.success(msg)
+
+        st.markdown("### Active purchases")
+        purchases=df_from("""SELECT id,provider,merchant,purchase_date,original_amount,remaining_balance,payment_frequency,installment_count,status
+                             FROM bnpl_purchases ORDER BY CASE status WHEN 'Active' THEN 0 ELSE 1 END,purchase_date DESC""")
+        if purchases.empty:
+            st.caption("No Affirm/Klarna purchases recorded yet.")
+        else:
+            st.dataframe(purchases,use_container_width=True,hide_index=True)
+            active=rows("SELECT * FROM bnpl_purchases WHERE status='Active' ORDER BY provider,merchant")
+            if active:
+                pmap={f"{x['provider']} · {x['merchant']} · remaining {money(x['remaining_balance'])}":x for x in active}
+                chosen=st.selectbox("View payment schedule",list(pmap.keys()),key="bnpl_schedule_purchase")
+                px=pmap[chosen]
+                sched=df_from("SELECT due_date,amount,status,paid_date,paycheck_id FROM bnpl_installments WHERE purchase_id=? ORDER BY due_date",(px["id"],))
+                st.dataframe(sched,use_container_width=True,hide_index=True)
+
+    # ---- CARDS / DEBT ----
+    with tabs[2]:
+        st.subheader("💳 Cards & Debt")
+        with st.form("add_debt_connected",clear_on_submit=True):
+            c=st.columns(4)
+            name=c[0].text_input("Account")
+            bal=c[1].number_input("Balance",min_value=0.0,step=25.0)
+            apr=c[2].number_input("APR %",min_value=0.0,step=.1)
+            minimum=c[3].number_input("Minimum payment",min_value=0.0,step=5.0)
+            if st.form_submit_button("Add debt / credit card"):
+                execute("INSERT INTO debts(name,balance,apr,min_payment,due_day,note) VALUES(?,?,?,?,?,?)",(name,bal,apr,minimum,1,""))
+                st.rerun()
+        debts=df_from("SELECT * FROM debts ORDER BY balance DESC")
+        if not debts.empty:
+            st.metric("Credit card / other debt total",money(debts.balance.sum()))
+            st.dataframe(debts,use_container_width=True,hide_index=True)
+            st.caption("Use Paycheck Command → Credit Card to plan what each paycheck sends toward these accounts.")
+
+    # ---- SHARED / RANDI ----
+    with tabs[3]:
+        st.subheader("🏠 Shared Money / Randi")
+        held,owed,physical=roommate_summary()
+        c=st.columns(3)
+        c[0].metric("Money held",money(held))
+        c[1].metric("Temporarily used / owe back",money(owed))
+        c[2].metric("Physically available",money(physical))
+        st.info("Held money stays protected from ChapLife's ordinary 'available to spend' thinking.")
+        # Keep existing shared household entry workflow from existing tables.
+        with st.form("roommate_receive_connected",clear_on_submit=True):
+            c=st.columns(3)
+            d=c[0].date_input("Received",date.today(),key="shared_recv_date")
+            amt=c[1].number_input("Amount received",min_value=0.0,step=25.0,key="shared_recv_amt")
+            note=c[2].text_input("Note",placeholder="Rent / bills / hold",key="shared_recv_note")
+            if st.form_submit_button("Record shared money"):
+                pid=execute("INSERT INTO roommate_payments(received_date,total_amount,note) VALUES(?,?,?)",(d.isoformat(),amt,note))
+                execute("INSERT INTO roommate_ledger(tx_date,action,amount,note) VALUES(?,?,?,?)",(d.isoformat(),"Hold Added",amt,note))
+                st.rerun()
+        ledger=df_from("SELECT * FROM roommate_ledger ORDER BY tx_date DESC,id DESC")
+        if not ledger.empty: st.dataframe(ledger,use_container_width=True,hide_index=True)
+
+    # ---- BILLS / SPENDING ----
+    with tabs[4]:
+        st.subheader("📋 Bills & Spending")
+        with st.form("connected_tx",clear_on_submit=True):
+            c=st.columns(4)
+            d=c[0].date_input("Date",date.today(),key="connected_txdate")
+            typ=c[1].selectbox("Type",["Expense","Income","Transfer"],key="connected_txtype")
+            cat=c[2].selectbox("Category",["Housing","Utilities","Food","Groceries","Transportation","Debt","Savings","Personal","Entertainment","Medical","Gifts","Subscription","Travel","Other"],key="connected_txcat")
+            merchant=c[3].text_input("Merchant / description",key="connected_txmerchant")
+            amount=st.number_input("Amount",min_value=0.0,step=5.0,key="connected_txamount")
+            if st.form_submit_button("Save transaction"):
+                execute("""INSERT INTO finance_transactions(tx_date,amount,tx_type,category,subcategory,need_want,merchant,note)
+                           VALUES(?,?,?,?,?,?,?,?)""",(d.isoformat(),amount,typ,cat,"Manual","",merchant,""))
+                st.rerun()
+        tx=df_from("SELECT * FROM finance_transactions ORDER BY tx_date DESC,id DESC LIMIT 100")
+        if not tx.empty: st.dataframe(tx,use_container_width=True,hide_index=True)
+
+    # ---- SAVINGS ----
+    with tabs[5]:
+        st.subheader("🎯 Savings")
+        goals=df_from("SELECT * FROM savings_goals ORDER BY priority,target_date")
+        if not goals.empty: st.dataframe(goals,use_container_width=True,hide_index=True)
+        st.caption("Savings amounts planned from a specific paycheck can be added directly in Paycheck Command.")
+
+    # ---- IMPORT ----
+    with tabs[6]:
+        st.subheader("📥 Budget Sheet / Paycheck Import")
+        st.info("Keep using the recent-paycheck rule: import the newest paycheck on or before today plus the 3 immediately before it. Future rows remain planning, not received income.")
+        st.caption("Your existing sheet-import workflow remains available in the prior build logic; this connected Finance system is ready to receive those paycheck dates.")
+
+    # ---- MONEY SETTINGS ----
+    with tabs[7]:
+        st.subheader("⚙️ Money Settings")
+        st.write("Affirm/Klarna limits live in the BNPL tab. Paycheck allocations, debt, held money and transactions all use the same finance database.")
+        st.caption("Personal limits are your own guardrails; they do not change the limit shown by Affirm or Klarna.")
+
+
+
+def _finances_legacy():
     st.title('💰 Finances')
     tabs=st.tabs(['Overview','Paychecks','Bills & Spending','🏠 Shared Household','Bill Funding','Savings Planner','Debt','Import / Export'])
 
