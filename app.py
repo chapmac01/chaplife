@@ -13,7 +13,7 @@ DB_PATH = APP_DIR / 'chaplife.db'
 
 st.set_page_config(page_title='ChapLife', page_icon='✨', layout='wide', initial_sidebar_state='collapsed')
 
-BUILD_VERSION='ChapLife 7.0.2 · Profile + Admin Routing Fix'
+BUILD_VERSION='ChapLife 7.0.3 · Clean Header + Navigation Fix'
 
 st.markdown('''
 <style>
@@ -247,6 +247,17 @@ def user_access_center():
                 execute("UPDATE app_users SET password_hash=?,updated_at=? WHERE id=?",
                         (_hash_password(p1),datetime.now().isoformat(timespec="seconds"),u["id"]))
                 st.success("Password updated.")
+
+    cloud_cols=st.columns(2)
+    if cloud_cols[0].button("↕ Sync now",use_container_width=True,key="profile_manual_cloud_sync"):
+        try:
+            cloud_push_db()
+            st.success("Synced.")
+        except Exception:
+            st.warning("Cloud sync needs attention.")
+    if cloud_cols[1].button("Sign out",use_container_width=True,key="profile_cloud_signout"):
+        cloud_logout()
+        st.rerun()
 
     st.divider()
     st.subheader("Optional Health Features")
@@ -753,7 +764,6 @@ def cloud_logout():
         st.session_state.pop(k,None)
 
 def cloud_auth_gate():
-    st.caption(f"☁️ {BUILD_VERSION}")
     if not CLOUD_CONFIGURED:
         st.error("Cloud build is running, but Supabase is not fully configured.")
         st.write("Secret check:")
@@ -822,24 +832,13 @@ def cloud_auth_gate():
 
 cloud_auth_gate()
 
-# Small account/sync strip shown after sign-in.
-_cloud=_cloud_session()
-_user_email=(_cloud.get("user") or {}).get("email","")
-acct=st.columns([5,1,1])
-acct[0].caption(f"☁️ {BUILD_VERSION} · Private cloud sync active" + (f" · {_user_email}" if _user_email else ""))
-
-# Automatic cloud sync every two minutes while this app session is open.
-# Streamlit's timed fragment reruns without throwing away the signed-in session.
+# Cloud sync continues silently after sign-in.
 if hasattr(st, "fragment"):
     @st.fragment(run_every=120)
     def _cloud_auto_sync_heartbeat():
-        st.caption("🔄 Auto-sync: every 2 minutes")
         try:
-            # Push current state first so recent local interactions are safe,
-            # then keep the cloud copy current. Existing writes already push immediately.
             cloud_push_db()
             st.session_state["_cloud_last_sync"]=datetime.now().strftime("%I:%M:%S %p")
-            # Calendar is less volatile than app state; refresh about every 15 minutes.
             if globals().get("GOOGLE_CAL_CONFIGURED", False) and callable(globals().get("google_calendar_connected")) and google_calendar_connected():
                 last_auto=float(st.session_state.get("_google_auto_sync_epoch",0) or 0)
                 if time.time()-last_auto>=900:
@@ -851,22 +850,6 @@ if hasattr(st, "fragment"):
         except Exception as e:
             st.session_state["_cloud_sync_error"]=str(e)
     _cloud_auto_sync_heartbeat()
-else:
-    st.caption("🔄 Auto-sync is enabled on supported Streamlit versions; manual Sync remains available.")
-if acct[1].button("↕ Sync now",use_container_width=True,key="manual_cloud_sync"):
-    try:
-        cloud_push_db(); st.success("Synced.")
-    except Exception as e:
-        st.error("Sync failed: "+str(e))
-if acct[2].button("Sign out",use_container_width=True,key="cloud_signout"):
-    cloud_logout(); st.rerun()
-if st.session_state.get("_cloud_sync_error"):
-    _sync_msg=str(st.session_state.pop("_cloud_sync_error"))
-    if "jwt expired" in _sync_msg.lower() or "expired" in _sync_msg.lower() and "jwt" in _sync_msg.lower():
-        st.info("☁️ Your cloud session expired. Your app can still open, but cloud sync is paused until you sign out and sign back in.")
-    else:
-        st.warning("Cloud sync needs attention. Your local app data is still available.")
-
 
 # ---------- Google Calendar OAuth ----------
 GOOGLE_CLIENT_ID=_secret("GOOGLE_CLIENT_ID")
@@ -1075,11 +1058,10 @@ def goto(p): st.session_state.page=p
 pages = {
  'Home':'🏠', 'Finances':'💰', 'Food & Nutrition':'🥗', 'Grocery Shopping':'🛒', 'My Trainer':'🏋🏾‍♀️',
  'Water & Jug Puzzles':'💧', 'Vocabulary':'📖', 'Health & Life':'❤️', 'Career Simulator':'🏗️',
- 'My Progress':'📈', 'Settings':'⚙️' ,'Profile':'👤','User Management':'🛡️'
-,
-    'Profile': user_access_center,
-    'User Management': owner_user_management
+ 'My Progress':'📈', 'Settings':'⚙️', 'Profile':'👤'
 }
+if _is_owner():
+    pages['User Management']='🛡️'
 
 # Private sections are hidden from navigation unless explicitly enabled in Settings.
 if bool(get_setting('show_growth_section',False)):
@@ -5729,6 +5711,8 @@ def friendly_app_error(section="this section"):
 ensure_multiuser_seed()
 
 page=st.session_state.page
+if page=='User Management' and not _is_owner():
+    page='Home'; st.session_state.page='Home'
 if page=='Growth Lab' and not bool(get_setting('show_growth_section',False)):
     page='Home'; st.session_state.page='Home'
 if page=='Conversation & Current Events' and not bool(get_setting('show_conversation_section',False)):
@@ -5747,7 +5731,9 @@ _renderers={
     'Health & Life':health,
     'Career Simulator':career,
     'My Progress':progress,
-    'Settings':settings_page
+    'Settings':settings_page,
+    'Profile':user_access_center,
+    'User Management':owner_user_management
 }
 try:
     _renderers.get(page,home)()
