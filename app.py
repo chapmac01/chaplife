@@ -11,7 +11,7 @@ DB_PATH = APP_DIR / 'chaplife.db'
 
 st.set_page_config(page_title='ChapLife', page_icon='✨', layout='wide', initial_sidebar_state='collapsed')
 
-BUILD_VERSION='ChapLife Cloud v6.3'
+BUILD_VERSION='ChapLife Cloud v6.4 · Budget Preloaded'
 
 st.markdown('''
 <style>
@@ -39,6 +39,47 @@ div[data-testid="stHorizontalBlock"] {gap:.65rem;}
 }
 </style>
 ''', unsafe_allow_html=True)
+
+
+# ---------- ChapLife display rules ----------
+# Store dates internally as ISO for reliable sorting, but ALWAYS show them MM/DD/YYYY.
+# Show clock times in 12-hour AM/PM format.
+def us_date(v):
+    if v in (None,""): return ""
+    try:
+        d=pd.to_datetime(v,errors="coerce")
+        if pd.isna(d): return str(v)
+        return d.strftime("%m/%d/%Y")
+    except Exception:
+        return str(v)
+
+def us_time(v):
+    if v in (None,""): return ""
+    s=str(v).strip()
+    for fmt in ("%H:%M:%S","%H:%M","%I:%M:%S %p","%I:%M %p"):
+        try:
+            return datetime.strptime(s,fmt).strftime("%I:%M %p").lstrip("0")
+        except Exception:
+            pass
+    try:
+        d=pd.to_datetime(v,errors="coerce")
+        if not pd.isna(d): return d.strftime("%I:%M %p").lstrip("0")
+    except Exception: pass
+    return s
+
+def display_df_us(df):
+    if df is None or df.empty: return df
+    z=df.copy()
+    for col in z.columns:
+        lc=str(col).lower()
+        if lc in {"pay_date","tx_date","purchase_date","first_payment_date","due_date","paid_date",
+                  "received_date","fund_date","target_date","contrib_date","meal_date","week_of",
+                  "workout_date","log_date","saved_date","start_date","end_date","dose_date",
+                  "event_date","import_date","created_at","migrated_at"} or lc.endswith("_date"):
+            z[col]=z[col].apply(us_date)
+        elif lc in {"dose_time","start_time","end_time","received_time","sent_time","completed_at","activity_time"} or lc.endswith("_time"):
+            z[col]=z[col].apply(us_time)
+    return z
 
 # ---------- DB ----------
 def db():
@@ -82,6 +123,11 @@ def init_db():
         provider TEXT PRIMARY KEY,
         balance_limit REAL DEFAULT 0,
         paycheck_limit REAL DEFAULT 0
+    );
+    CREATE TABLE IF NOT EXISTS chaplife_seed_state (
+        seed_key TEXT PRIMARY KEY,
+        applied_at TEXT,
+        note TEXT
     );
     CREATE TABLE IF NOT EXISTS finance_migration_state (
         id INTEGER PRIMARY KEY CHECK (id=1),
@@ -1127,9 +1173,147 @@ def import_budget_findings(found,source_name):
     set_finance_migration_done(source_name)
     return len(selected)
 
+
+def preload_uploaded_budget_once():
+    """One-time seed from the user's uploaded Budget sheet.xlsx, read directly for this build."""
+    seed_key="budget_sheet_2026_08_29_v1"
+    if rows("SELECT seed_key FROM chaplife_seed_state WHERE seed_key=?",(seed_key,)):
+        return
+
+    # Four most recent ACTUAL paychecks as of 08/29/2026. Sept 4 is future planning only.
+    paycheck_seed=[
+        ("2026-07-10",2349.71,2349.71,"Budget sheet · July 10"),
+        ("2026-07-24",3049.71,3049.71,"Budget sheet · July 24"),
+        ("2026-08-07",2349.71,2349.71,"Budget sheet · Aug 7"),
+        ("2026-08-21",2349.71,2349.71,"Budget sheet · Aug 21"),
+        ("2026-09-04",2349.71,0.0,"PLANNED · Budget sheet · Sept 4"),
+    ]
+    pids={}
+    for d,expected,actual,note in paycheck_seed:
+        r=rows("SELECT id FROM paychecks WHERE pay_date=?",(d,))
+        if r:
+            pid=r[0]["id"]
+            execute("UPDATE paychecks SET expected=?,actual=?,note=? WHERE id=?",(expected,actual,note,pid))
+        else:
+            pid=execute("INSERT INTO paychecks(pay_date,expected,actual,note) VALUES(?,?,?,?)",(d,expected,actual,note))
+        pids[d]=pid
+        if actual>0 and not rows("""SELECT id FROM finance_transactions WHERE tx_date=? AND tx_type='Income'
+                                    AND category='Paycheck' AND ABS(amount-?)<0.01""",(d,actual)):
+            execute("""INSERT INTO finance_transactions(tx_date,amount,tx_type,category,subcategory,need_want,merchant,note)
+                       VALUES(?,?,?,?,?,?,?,?)""",(d,actual,"Income","Paycheck","Budget Sheet","Income","Paycheck",note))
+
+    # Sept 4 planning section from the workbook.
+    sept_pid=pids["2026-09-04"]
+    plan_items=[
+        ("BNPL","Affirm",367.16,0,"Budget sheet · Sept 4"),
+        ("BNPL","Klarna",199.50,0,"Budget sheet · Sept 4"),
+        ("Groceries","Groceries",175.00,0,"Budget sheet · Sept 4"),
+        ("Transportation","EZ Pass & gas",45.00,0,"Budget sheet · Sept 4"),
+        ("Food","Cook Unity",600.00,0,"Budget sheet · Sept 4"),
+        ("Food","Overnight Oats",58.00,0,"Budget sheet · Sept 4"),
+        ("Housing","Rent",900.00,0,"Budget sheet · Sept 4"),
+        ("Travel","Sundance Vacations",121.64,0,"Budget sheet · Sept 4"),
+        ("Subscription","Rocket",7.62,0,"Budget sheet · Sept 4"),
+        ("Subscription","Patreon",15.75,0,"Budget sheet · Sept 4"),
+        ("Subscription","Prime Video",8.99,0,"Budget sheet · Sept 4"),
+        ("Phone","T-Mobile",57.10,0,"Budget sheet · Sept 4"),
+        ("Subscription","Blooket",9.99,0,"Budget sheet · Sept 4"),
+        ("Subscription","Spotify",11.99,0,"Budget sheet · Sept 4"),
+        ("Debt","Chase",188.831839,0,"Budget sheet · Sept 4"),
+        ("Phone","Verizon",56.10,0,"Budget sheet · Sept 4"),
+        ("Subscription","Max",16.99,0,"Budget sheet · Sept 4"),
+        ("Subscription","ChatGPT",21.78,0,"Budget sheet · Sept 4"),
+        ("Subscription","BET Plus",10.99,0,"Budget sheet · Sept 4"),
+        ("Debt","Capital 1",70.00,0,"Budget sheet · Sept 4"),
+        ("Subscription","Cricut",10.88,0,"Budget sheet · Sept 4"),
+        ("Subscription","Amazon Prime",16.32,0,"Budget sheet · Sept 4"),
+        ("Utilities","Con-Ed",318.83,0,"Budget sheet · Sept 4"),
+        ("Subscription","Paramount App",12.99,0,"Budget sheet · Sept 4"),
+        ("Subscription","Disney Plus",20.00,0,"Budget sheet · Sept 4"),
+        ("Subscription","Adobe",37.55,0,"Budget sheet · Sept 4"),
+        ("Subscription","Patreon",4.50,0,"Budget sheet · Sept 4"),
+        ("Subscription","Samsung",10.99,0,"Budget sheet · Sept 4"),
+        ("Subscription","Google One",2.17,0,"Budget sheet · Sept 4"),
+        ("Insurance","State Farm",171.30,0,"Budget sheet · Sept 4"),
+        ("Subscription","Peacock",7.99,0,"Budget sheet · Sept 4"),
+        ("Randi / Protected","Randi Holdings",100.00,1,"Protected money · Budget sheet · Sept 4"),
+        ("Savings","Savings",100.00,0,"Budget sheet · Sept 4"),
+        ("Utilities","National Grid",82.50,0,"Budget sheet · Sept 4"),
+        ("IRS","IRS",2114.00,0,"Balance/amount shown in Budget sheet · Sept 4"),
+        ("Dues","Dues",424.00,0,"Local $100 · Regional $60 · National $250 · Spear $14"),
+    ]
+    for category,name,amt,protected,note in plan_items:
+        exists=rows("""SELECT id FROM paycheck_plan_items WHERE paycheck_id=? AND category=? AND name=? AND ABS(planned_amount-?)<0.01""",
+                    (sept_pid,category,name,amt))
+        if not exists:
+            execute("""INSERT INTO paycheck_plan_items(paycheck_id,category,name,planned_amount,actual_amount,status,protected,note)
+                       VALUES(?,?,?,?,?,?,?,?)""",(sept_pid,category,name,amt,0.0,"Planned",protected,note))
+
+    # Randi note from Aug 21 is protected context, not spendable money.
+    if not rows("SELECT id FROM roommate_ledger WHERE tx_date='2026-08-21' AND action='Hold Added' AND ABS(amount-150)<0.01"):
+        execute("INSERT INTO roommate_ledger(tx_date,action,amount,note) VALUES(?,?,?,?)",
+                ("2026-08-21","Hold Added",150.0,"Budget sheet note: 150 from me holding her money + 200 from Shen. Only the clearly stated $150 held by me is entered as ChapLife-held money."))
+
+    # Credit-card balances shown in Sept 4 side calculations.
+    debt_seed=[
+        ("Capital 1",1717.368628,0.0,70.0,"Budget sheet · Sept 4 · amount shown as what you will owe next bill with interest"),
+        ("Chase",6377.462641,0.0,188.831839,"Budget sheet · Sept 4 · amount shown as what you will owe next bill with interest"),
+    ]
+    for name,balance,apr,minpay,note in debt_seed:
+        r=rows("SELECT id FROM debts WHERE lower(name)=lower(?)",(name,))
+        if r:
+            execute("UPDATE debts SET balance=?,min_payment=?,note=? WHERE id=?",(balance,minpay,note,r[0]["id"]))
+        else:
+            execute("INSERT INTO debts(name,balance,apr,min_payment,due_day,note) VALUES(?,?,?,?,?,?)",
+                    (name,balance,apr,minpay,1,note))
+
+    # Active Affirm snapshot from Sept 4. Exact merchant, debt, scheduled-payment pairs in the workbook.
+    affirm=[
+        ("Study.com",40.79,13.88,"2026-09-04"),
+        ("Amazon",92.05,23.06,"2026-09-04"),
+        ("Amazon #2",91.76,15.28,"2026-09-04"),
+        ("JetBlue",327.94,65.69,"2026-09-04"),
+        ("Instacart",125.11,25.02,"2026-09-04"),
+        ("Hairbrella",69.40,17.45,"2026-09-04"),
+        ("Amazon #3",344.08,21.50,"2026-09-04"),
+        ("Affirm Card",211.32,44.68,"2026-09-04"),
+        ("Uber",48.78,16.26,"2026-09-04"),
+        ("Instacart #2",70.16,11.69,"2026-09-04"),
+    ]
+    # Active Klarna snapshot from Sept 4. Zero/negative debt rows are not seeded as active balances.
+    klarna=[
+        ("Instacart",15.77,36.27,"2026-09-04"),
+        ("Nike",179.63,62.50,"2026-09-04"),
+        ("Instacart #2",60.46,27.74,"2026-09-04"),
+        ("Hermosa Hair",189.99,63.52,"2026-09-04"),
+        ("Amazon",170.22,60.09,"2026-09-04"),
+    ]
+    for provider,data in (("Affirm",affirm),("Klarna",klarna)):
+        for merchant,balance,payment,due in data:
+            r=rows("""SELECT id FROM bnpl_purchases WHERE provider=? AND lower(merchant)=lower(?) AND status='Active'""",(provider,merchant))
+            if r:
+                pid=r[0]["id"]
+                execute("UPDATE bnpl_purchases SET remaining_balance=?,note=? WHERE id=?",
+                        (balance,"Preloaded from Budget sheet · Sept 4 snapshot",pid))
+            else:
+                pid=execute("""INSERT INTO bnpl_purchases(provider,merchant,purchase_date,original_amount,remaining_balance,
+                               payment_frequency,installment_count,first_payment_date,status,note)
+                               VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                            (provider,merchant,"2026-09-04",balance,balance,"Imported snapshot",0,due,"Active",
+                             "Preloaded from Budget sheet · Sept 4 snapshot"))
+            if not rows("""SELECT id FROM bnpl_installments WHERE purchase_id=? AND due_date=? AND ABS(amount-?)<0.01""",(pid,due,payment)):
+                execute("INSERT INTO bnpl_installments(purchase_id,due_date,amount,status,paycheck_id) VALUES(?,?,?,'Planned',?)",
+                        (pid,due,payment,sept_pid))
+
+    execute("INSERT OR REPLACE INTO chaplife_seed_state(seed_key,applied_at,note) VALUES(?,?,?)",
+            (seed_key,datetime.now().isoformat(),"Preloaded from user-uploaded Budget sheet.xlsx"))
+    reassign_bnpl_installments()
+
 def finances():
     st.title("💰 Finances")
+    preload_uploaded_budget_once()
     reassign_bnpl_installments()
+    st.caption("✓ Your old Budget sheet is preloaded into ChapLife · Dates display MM/DD/YYYY · Times display with AM/PM")
     tabs=st.tabs([
         "💵 Paycheck Command","🛍️ Affirm & Klarna","💳 Cards & Debt","🏠 Shared / Randi",
         "📋 Bills & Spending","🎯 Savings","📥 Import","⚙️ Money Settings"
@@ -1190,7 +1374,7 @@ def finances():
             if inst.empty:
                 st.caption("No Affirm/Klarna installments assigned to this paycheck.")
             else:
-                st.dataframe(inst[["due_date","provider","merchant","amount","status","remaining_balance"]],
+                st.dataframe(display_df_us(inst[["due_date","provider","merchant","amount","status","remaining_balance"]]),
                              use_container_width=True,hide_index=True)
                 unpaid=[r for r in rows("""SELECT i.id,i.due_date,p.provider,p.merchant,i.amount
                                           FROM bnpl_installments i JOIN bnpl_purchases p ON p.id=i.purchase_id
@@ -1222,7 +1406,7 @@ def finances():
 
             items=df_from("SELECT * FROM paycheck_plan_items WHERE paycheck_id=? ORDER BY id DESC",(pid,))
             if not items.empty:
-                st.dataframe(items[["category","name","planned_amount","actual_amount","status","note"]],use_container_width=True,hide_index=True)
+                st.dataframe(display_df_us(items[["category","name","planned_amount","actual_amount","status","note"]]),use_container_width=True,hide_index=True)
                 delmap={f"{r['category']} · {r['name']} · {money(r['planned_amount'])}":r for r in rows("SELECT * FROM paycheck_plan_items WHERE paycheck_id=?",(pid,))}
                 dsel=st.selectbox("Remove a planned item",["Select..."]+list(delmap.keys()),key="delete_plan_item")
                 if dsel!="Select..." and st.button("Remove selected item",key="delete_plan_item_btn"):
@@ -1309,7 +1493,10 @@ def finances():
                 st.rerun()
         if st.session_state.get("bnpl_warning"):
             msg=st.session_state.pop("bnpl_warning")
-            st.error(msg) if msg.startswith("🔴") else st.success(msg)
+            if msg.startswith("🔴"):
+                st.error(msg)
+            else:
+                st.success(msg)
 
         st.markdown("### Active purchases")
         purchases=df_from("""SELECT id,provider,merchant,purchase_date,original_amount,remaining_balance,payment_frequency,installment_count,status
@@ -1317,14 +1504,14 @@ def finances():
         if purchases.empty:
             st.caption("No Affirm/Klarna purchases recorded yet.")
         else:
-            st.dataframe(purchases,use_container_width=True,hide_index=True)
+            st.dataframe(display_df_us(purchases),use_container_width=True,hide_index=True)
             active=rows("SELECT * FROM bnpl_purchases WHERE status='Active' ORDER BY provider,merchant")
             if active:
                 pmap={f"{x['provider']} · {x['merchant']} · remaining {money(x['remaining_balance'])}":x for x in active}
                 chosen=st.selectbox("View payment schedule",list(pmap.keys()),key="bnpl_schedule_purchase")
                 px=pmap[chosen]
                 sched=df_from("SELECT due_date,amount,status,paid_date,paycheck_id FROM bnpl_installments WHERE purchase_id=? ORDER BY due_date",(px["id"],))
-                st.dataframe(sched,use_container_width=True,hide_index=True)
+                st.dataframe(display_df_us(sched),use_container_width=True,hide_index=True)
 
     # ---- CARDS / DEBT ----
     with tabs[2]:
@@ -1341,7 +1528,7 @@ def finances():
         debts=df_from("SELECT * FROM debts ORDER BY balance DESC")
         if not debts.empty:
             st.metric("Credit card / other debt total",money(debts.balance.sum()))
-            st.dataframe(debts,use_container_width=True,hide_index=True)
+            st.dataframe(display_df_us(debts),use_container_width=True,hide_index=True)
             st.caption("Use Paycheck Command → Credit Card to plan what each paycheck sends toward these accounts.")
 
     # ---- SHARED / RANDI ----
@@ -1364,7 +1551,7 @@ def finances():
                 execute("INSERT INTO roommate_ledger(tx_date,action,amount,note) VALUES(?,?,?,?)",(d.isoformat(),"Hold Added",amt,note))
                 st.rerun()
         ledger=df_from("SELECT * FROM roommate_ledger ORDER BY tx_date DESC,id DESC")
-        if not ledger.empty: st.dataframe(ledger,use_container_width=True,hide_index=True)
+        if not ledger.empty: st.dataframe(display_df_us(ledger),use_container_width=True,hide_index=True)
 
     # ---- BILLS / SPENDING ----
     with tabs[4]:
@@ -1381,13 +1568,13 @@ def finances():
                            VALUES(?,?,?,?,?,?,?,?)""",(d.isoformat(),amount,typ,cat,"Manual","",merchant,""))
                 st.rerun()
         tx=df_from("SELECT * FROM finance_transactions ORDER BY tx_date DESC,id DESC LIMIT 100")
-        if not tx.empty: st.dataframe(tx,use_container_width=True,hide_index=True)
+        if not tx.empty: st.dataframe(display_df_us(tx),use_container_width=True,hide_index=True)
 
     # ---- SAVINGS ----
     with tabs[5]:
         st.subheader("🎯 Savings")
         goals=df_from("SELECT * FROM savings_goals ORDER BY priority,target_date")
-        if not goals.empty: st.dataframe(goals,use_container_width=True,hide_index=True)
+        if not goals.empty: st.dataframe(display_df_us(goals),use_container_width=True,hide_index=True)
         st.caption("Savings amounts planned from a specific paycheck can be added directly in Paycheck Command.")
 
     # ---- ONE-TIME MIGRATION / BACKUP ----
@@ -1426,7 +1613,7 @@ def finances():
         st.divider()
         st.subheader("🛟 Finance Backup & Restore")
         backup=json.dumps(finance_backup_payload(),indent=2,default=str).encode("utf-8")
-        st.download_button("⬇️ Download Finance Backup",data=backup,file_name=f"ChapLife_Finance_Backup_{date.today().isoformat()}.json",mime="application/json",use_container_width=True)
+        st.download_button("⬇️ Download Finance Backup",data=backup,file_name=f"ChapLife_Finance_Backup_{date.today().strftime('%m-%d-%Y')}.json",mime="application/json",use_container_width=True)
         restore=st.file_uploader("Restore a ChapLife Finance backup",type=["json"],key="finance_restore")
         if restore is not None:
             st.warning("Restore replaces the current Finance records with the backup.")
@@ -1664,7 +1851,7 @@ def _finances_legacy():
                         fshow=future[["_pay_date","_expected","_actual"]].copy()
                         fshow.columns=["Future pay date","Expected","Planned / entered amount"]
                         st.dataframe(fshow.head(20),use_container_width=True,hide_index=True)
-                        st.caption(f'{len(future)} future-dated row(s) excluded because those dates are after {date.today().isoformat()}.')
+                        st.caption(f'{len(future)} future-dated row(s) excluded because those dates are after {date.today().strftime('%m/%d/%Y')}.')
 
                     if not selected.empty:
                         c=st.columns(2)
