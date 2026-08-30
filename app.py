@@ -13,7 +13,7 @@ DB_PATH = APP_DIR / 'chaplife.db'
 
 st.set_page_config(page_title='ChapLife', page_icon='✨', layout='wide', initial_sidebar_state='collapsed')
 
-BUILD_VERSION='ChapLife 7.0.1 · Multi-User Startup Fix'
+BUILD_VERSION='ChapLife 7.0.2 · Profile + Admin Routing Fix'
 
 st.markdown('''
 <style>
@@ -151,13 +151,15 @@ def _provider_name(provider_key, fallback):
     return r[0]["display_name"] if r and r[0]["display_name"] else fallback
 
 def user_access_center():
-    st.title("👤 Profile & Access")
+    st.title("👤 Profile")
     u=_current_user()
     if not u:
         st.error("No active ChapLife profile.")
         return
 
-    st.subheader("My Profile")
+    st.write("Your profile helps ChapLife personalize things like workouts, health tools, and recommendations. Your private data stays separate from your public-facing profile.")
+
+    st.subheader("About Me")
     c=st.columns([1,2])
     with c[0]:
         if u["profile_photo"]:
@@ -174,24 +176,64 @@ def user_access_center():
             st.rerun()
 
     with c[1]:
+        gender_saved=get_setting(f"user_{u['id']}_gender","Prefer not to say")
+        gender_opts=["Woman","Man","Non-binary","Prefer not to say","Custom"]
+        gender_idx=gender_opts.index(gender_saved) if gender_saved in gender_opts else gender_opts.index("Custom")
+
+        birth_saved=get_setting(f"user_{u['id']}_birthdate","")
+        height_saved=get_setting(f"user_{u['id']}_height","")
+        workout_goal_saved=get_setting(f"user_{u['id']}_workout_goal","")
+        activity_saved=get_setting(f"user_{u['id']}_activity_level","")
+
         with st.form("profile_form"):
-            display=st.text_input("Display name",value=u["display_name"] or "")
-            username=st.text_input("Username",value=u["username"] or "")
-            bio=st.text_area("Short bio",value=u["bio"] or "",height=100)
-            visible=st.toggle("Allow my profile to be visible in future social features",
-                              value=bool(u["profile_visible"]))
+            display=st.text_input("Name / display name",value=u["display_name"] or "")
+            username=st.text_input(
+                "Optional username for login",
+                value=u["username"] or "",
+                help="You can keep using your PIN, or create a username to use for login later."
+            )
+            gender=st.selectbox("Gender",gender_opts,index=gender_idx)
+            gender_custom=""
+            if gender=="Custom":
+                gender_custom=st.text_input("How would you like ChapLife to describe your gender?",
+                                            value=gender_saved if gender_saved not in gender_opts else "")
+            birthdate=st.text_input("Birthday (optional)",value=birth_saved,placeholder="MM/DD/YYYY")
+            height=st.text_input("Height (optional)",value=height_saved,placeholder="Example: 5'4\"")
+            activity=st.selectbox(
+                "Current activity level",
+                ["","Mostly sedentary","Lightly active","Moderately active","Very active"],
+                index=["","Mostly sedentary","Lightly active","Moderately active","Very active"].index(activity_saved)
+                if activity_saved in ["","Mostly sedentary","Lightly active","Moderately active","Very active"] else 0
+            )
+            workout_goal=st.text_input(
+                "Main fitness / workout goal",
+                value=workout_goal_saved,
+                placeholder="Example: lose weight, build glutes, get stronger, improve stamina"
+            )
+            bio=st.text_area("Short bio (optional)",value=u["bio"] or "",height=90)
+            visible=st.toggle(
+                "Allow my profile to be visible in future social features",
+                value=bool(u["profile_visible"]),
+                help="This only controls future profile visibility. It does not make your finances, health, weight, cycle, calendar, or other private data public."
+            )
             if st.form_submit_button("Save Profile",use_container_width=True):
                 try:
                     execute("""UPDATE app_users SET display_name=?,username=?,bio=?,profile_visible=?,updated_at=?
                                WHERE id=?""",
-                            (display,username,bio,1 if visible else 0,datetime.now().isoformat(timespec="seconds"),u["id"]))
+                            (display,username.strip() or None,bio,1 if visible else 0,
+                             datetime.now().isoformat(timespec="seconds"),u["id"]))
+                    set_setting(f"user_{u['id']}_gender", gender_custom.strip() if gender=="Custom" and gender_custom.strip() else gender)
+                    set_setting(f"user_{u['id']}_birthdate", birthdate.strip())
+                    set_setting(f"user_{u['id']}_height", height.strip())
+                    set_setting(f"user_{u['id']}_activity_level", activity)
+                    set_setting(f"user_{u['id']}_workout_goal", workout_goal.strip())
                     st.success("Profile updated.")
                     st.rerun()
                 except Exception:
                     st.error("That username is already in use.")
 
     st.divider()
-    st.subheader("PIN & Password")
+    st.subheader("Login & Security")
     st.info(f"Your ChapLife PIN: **{u['pin']}**")
     with st.form("set_password"):
         p1=st.text_input("Create / change password",type="password")
@@ -207,25 +249,36 @@ def user_access_center():
                 st.success("Password updated.")
 
     st.divider()
-    st.subheader("Optional Modules")
+    st.subheader("Optional Health Features")
     cycle_current=get_setting(f"user_{u['id']}_cycle_mode","My cycle")
-    mode=st.selectbox("Cycle tracking",["My cycle","Partner cycle","Hide cycle tracking"],
-                      index=["My cycle","Partner cycle","Hide cycle tracking"].index(cycle_current)
-                      if cycle_current in ["My cycle","Partner cycle","Hide cycle tracking"] else 0)
-    if st.button("Save Module Choices",use_container_width=True):
+    cycle_choices=["My cycle","Partner cycle","Hide cycle tracking"]
+    mode=st.selectbox(
+        "Cycle tracking",
+        cycle_choices,
+        index=cycle_choices.index(cycle_current) if cycle_current in cycle_choices else 0
+    )
+    if mode=="Partner cycle":
+        st.caption("Only track a partner's health information with their permission.")
+    if st.button("Save Health Feature Choices",use_container_width=True,key="save_profile_modules"):
         set_setting(f"user_{u['id']}_cycle_mode",mode)
         st.success("Saved.")
 
     st.divider()
-    st.subheader("Delete My Account")
-    confirm=st.checkbox("I understand this disables my ChapLife account.")
-    if st.button("Delete My Account",disabled=not confirm,use_container_width=True):
+    feature_request_center(embedded=True)
+
+    st.divider()
+    st.subheader("Account")
+    confirm=st.checkbox("I understand this disables my ChapLife account.",key="confirm_delete_self")
+    if st.button("Delete My Account",disabled=not confirm,use_container_width=True,key="delete_self_account"):
         execute("UPDATE app_users SET active=0 WHERE id=?",(u["id"],))
         st.session_state.pop("chaplife_user_id",None)
         st.success("Account disabled.")
 
-def feature_request_center():
-    st.title("🛠️ Request Something From Chennel")
+def feature_request_center(embedded=False):
+    if embedded:
+        st.subheader("🛠️ Request Something From Chennel")
+    else:
+        st.title("🛠️ Request Something From Chennel")
     u=_current_user()
     st.write("Describe exactly what you want ChapLife to do. The more specific you are, the easier it is to build it the way you pictured it.")
     with st.form("feature_request_form",clear_on_submit=True):
@@ -267,6 +320,7 @@ def owner_user_management():
         st.error("Owner access only.")
         return
     st.title("🛡️ User Management")
+    st.caption("Manage access without opening anyone else's private ChapLife data.")
     users=rows("SELECT * FROM app_users ORDER BY id")
     for u in users:
         with st.container(border=True):
@@ -1021,7 +1075,10 @@ def goto(p): st.session_state.page=p
 pages = {
  'Home':'🏠', 'Finances':'💰', 'Food & Nutrition':'🥗', 'Grocery Shopping':'🛒', 'My Trainer':'🏋🏾‍♀️',
  'Water & Jug Puzzles':'💧', 'Vocabulary':'📖', 'Health & Life':'❤️', 'Career Simulator':'🏗️',
- 'My Progress':'📈', 'Settings':'⚙️','Profile & Access':'👤','Request Something':'🛠️','User Management':'🛡️'
+ 'My Progress':'📈', 'Settings':'⚙️' ,'Profile':'👤','User Management':'🛡️'
+,
+    'Profile': user_access_center,
+    'User Management': owner_user_management
 }
 
 # Private sections are hidden from navigation unless explicitly enabled in Settings.
