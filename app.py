@@ -11,7 +11,7 @@ DB_PATH = APP_DIR / 'chaplife.db'
 
 st.set_page_config(page_title='ChapLife', page_icon='✨', layout='wide', initial_sidebar_state='collapsed')
 
-BUILD_VERSION='ChapLife Cloud v6.4 · Budget Preloaded'
+BUILD_VERSION='ChapLife Cloud v6.5 · Card Paydown'
 
 st.markdown('''
 <style>
@@ -1260,6 +1260,10 @@ def preload_uploaded_budget_once():
         ("Chase",6377.462641,0.0,188.831839,"Budget sheet · Sept 4 · amount shown as what you will owe next bill with interest"),
     ]
     for name,balance,apr,minpay,note in debt_seed:
+        # Public issuer terms do not reveal the user's account-specific APR.
+        # These are conservative public-rate estimates until the exact statement APR is entered.
+        if name=="Chase": apr=28.24
+        elif name=="Capital 1": apr=28.99
         r=rows("SELECT id FROM debts WHERE lower(name)=lower(?)",(name,))
         if r:
             execute("UPDATE debts SET balance=?,min_payment=?,note=? WHERE id=?",(balance,minpay,note,r[0]["id"]))
@@ -1528,6 +1532,51 @@ def finances():
         debts=df_from("SELECT * FROM debts ORDER BY balance DESC")
         if not debts.empty:
             st.metric("Credit card / other debt total",money(debts.balance.sum()))
+            st.markdown("### 💳 Credit Card Paydown Coach")
+            st.caption("The starting APRs for Chase and Capital One are conservative public-rate estimates—not your personal account APR. Enter the Purchase APR from your latest statement for exact planning.")
+
+            cards=debts[debts["name"].astype(str).str.lower().str.contains("chase|capital",regex=True)]
+            for _,card in cards.iterrows():
+                cid=int(card["id"]); cname=str(card["name"])
+                balance=float(card["balance"] or 0); saved_apr=float(card["apr"] or 0)
+                if saved_apr<=0:
+                    saved_apr=28.24 if "chase" in cname.lower() else 28.99
+
+                with st.container(border=True):
+                    st.markdown(f"#### {cname}")
+                    c1,c2,c3=st.columns(3)
+                    c1.metric("Balance",money(balance))
+                    c2.metric("APR used",f"{saved_apr:.2f}%")
+                    c3.metric("Current minimum",money(float(card["min_payment"] or 0)))
+
+                    exact_apr=st.number_input(
+                        f"{cname} Purchase APR (%)",
+                        min_value=0.0,max_value=50.0,value=float(saved_apr),step=0.01,
+                        key=f"card_apr_{cid}",
+                        help="Use the Purchase APR from your most recent statement."
+                    )
+                    principal_goal=st.number_input(
+                        f"How much {cname} principal do you want to knock off this month?",
+                        min_value=0.0,value=100.0,step=25.0,key=f"principal_goal_{cid}"
+                    )
+
+                    est_interest=balance*(float(exact_apr)/100.0)/12.0
+                    minimum=float(card["min_payment"] or 0)
+                    recommended=max(minimum,est_interest+float(principal_goal))
+                    after=max(0.0,balance-float(principal_goal))
+
+                    a,b,c=st.columns(3)
+                    a.metric("Est. interest this month",money(est_interest))
+                    b.metric("Suggested payment",money(recommended))
+                    c.metric("Est. balance after principal",money(after))
+                    st.caption(f"Planning estimate: about {money(est_interest)} covers one month of interest and about {money(principal_goal)} attacks principal. Actual card interest is generally based on daily/average daily balances, so the statement amount can differ.")
+
+                    if st.button(f"Save {cname} APR",key=f"save_card_apr_{cid}",use_container_width=True):
+                        execute("UPDATE debts SET apr=? WHERE id=?",(float(exact_apr),cid))
+                        st.success(f"{cname} APR saved at {exact_apr:.2f}%.")
+                        st.rerun()
+
+            st.markdown("### All Cards / Debt")
             st.dataframe(display_df_us(debts),use_container_width=True,hide_index=True)
             st.caption("Use Paycheck Command → Credit Card to plan what each paycheck sends toward these accounts.")
 
