@@ -9,11 +9,19 @@ from collections import deque, defaultdict
 import pandas as pd
 
 APP_DIR = Path(__file__).parent
-DB_PATH = APP_DIR / 'chaplife.db'
+OWNER_DB_PATH = APP_DIR / 'chaplife.db'
+DB_PATH = OWNER_DB_PATH
+
+def current_db_path():
+    member_id=st.session_state.get("_chaplife_member_id")
+    if member_id:
+        safe=re.sub(r"[^a-zA-Z0-9_-]+","_",str(member_id))
+        return APP_DIR / f".chaplife_member_{safe}.db"
+    return OWNER_DB_PATH
 
 st.set_page_config(page_title='ChapLife', page_icon='✨', layout='wide', initial_sidebar_state='collapsed')
 
-BUILD_VERSION='ChapLife 7.0.3 · Clean Header + Navigation Fix'
+BUILD_VERSION='ChapLife 7.1 · Shared Access + Approval'
 
 st.markdown('''
 <style>
@@ -38,6 +46,56 @@ div[data-testid="stHorizontalBlock"] {gap:.65rem;}
   .hero h1 {font-size:1.65rem;}
   .jug {height:165px; max-width:115px;}
   .bigcard {min-height:100px;}
+}
+
+/* ChapLife 7.1 — modern, sidebar-free shell */
+.stApp {
+  background:
+    radial-gradient(circle at 8% 0%, rgba(116,91,255,.08), transparent 28rem),
+    radial-gradient(circle at 92% 4%, rgba(0,172,193,.06), transparent 26rem);
+}
+.block-container {max-width:1220px; padding-top:1.15rem;}
+.hero {
+  background:linear-gradient(135deg, rgba(255,255,255,.72), rgba(255,255,255,.34));
+  backdrop-filter:blur(18px);
+  border:1px solid rgba(130,130,150,.18);
+  box-shadow:0 18px 55px rgba(20,20,40,.06);
+}
+[data-testid="stForm"], div[data-testid="stVerticalBlockBorderWrapper"] {
+  border-radius:22px !important;
+}
+.stButton>button, .stFormSubmitButton>button {
+  border-radius:16px !important;
+  border:1px solid rgba(120,120,145,.20) !important;
+  transition:transform .14s ease, box-shadow .14s ease, border-color .14s ease;
+}
+.stButton>button:hover, .stFormSubmitButton>button:hover {
+  transform:translateY(-1px);
+  box-shadow:0 10px 26px rgba(25,25,45,.10);
+}
+input, textarea, [data-baseweb="select"] > div {
+  border-radius:14px !important;
+}
+.chap-auth-shell {
+  max-width:760px; margin:2.4rem auto .8rem; padding:2rem;
+  border:1px solid rgba(120,120,145,.18); border-radius:30px;
+  background:rgba(255,255,255,.62); backdrop-filter:blur(20px);
+  box-shadow:0 24px 80px rgba(20,20,40,.08);
+}
+.chap-auth-mark {
+  width:54px;height:54px;border-radius:18px;display:flex;align-items:center;justify-content:center;
+  background:linear-gradient(135deg,rgba(116,91,255,.15),rgba(0,172,193,.12));
+  font-size:1.7rem;margin-bottom:.8rem;
+}
+.chap-auth-shell h1 {margin:.1rem 0 .35rem;font-size:2.2rem;letter-spacing:-.04em;}
+.chap-auth-shell p {margin:0;opacity:.68;}
+.chap-status {
+  display:inline-block;padding:.28rem .65rem;border-radius:999px;font-size:.78rem;font-weight:750;
+  background:rgba(120,120,145,.10);
+}
+@media (max-width:640px){
+  .chap-auth-shell {margin:.7rem 0;padding:1.1rem;border-radius:22px;}
+  .chap-auth-shell h1 {font-size:1.75rem;}
 }
 </style>
 ''', unsafe_allow_html=True)
@@ -85,7 +143,7 @@ def display_df_us(df):
 
 # ---------- DB ----------
 def db():
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn = sqlite3.connect(current_db_path(), check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -125,23 +183,28 @@ def ensure_multiuser_seed():
             pass
 
 def _current_user():
+    # Friend/member sessions come from the central ChapLife registry.
+    member=st.session_state.get("_chaplife_member_profile")
+    if member:
+        return member
+    # Owner keeps the existing private cloud account and local owner profile.
     uid=st.session_state.get("chaplife_user_id")
     if uid:
         rr=rows("SELECT * FROM app_users WHERE id=? AND active=1",(uid,))
-        if rr: return rr[0]
-    # Preview behavior: keep owner logged in so existing ChapLife still opens normally.
+        if rr: return dict(rr[0])
     rr=rows("SELECT * FROM app_users WHERE username=? AND active=1",(OWNER_USERNAME,))
     if rr:
         st.session_state["chaplife_user_id"]=rr[0]["id"]
-        return rr[0]
+        return dict(rr[0])
     return None
 
 def _is_owner():
     u=_current_user()
-    return bool(u and u["role"]=="owner")
+    return bool(u and u.get("role")=="owner")
 
 def _safe_display_name(u):
-    return (u["display_name"] or u["username"] or f"User {u['id']}") if u else "ChapLife User"
+    if not u: return "ChapLife User"
+    return u.get("display_name") or u.get("username") or "ChapLife User"
 
 def _provider_name(provider_key, fallback):
     u=_current_user()
@@ -156,42 +219,40 @@ def user_access_center():
     if not u:
         st.error("No active ChapLife profile.")
         return
+    is_member=bool(st.session_state.get("_chaplife_member_id"))
 
-    st.write("Your profile helps ChapLife personalize things like workouts, health tools, and recommendations. Your private data stays separate from your public-facing profile.")
+    st.write("This information helps ChapLife personalize workouts, health tools, food planning, and recommendations.")
 
     st.subheader("About Me")
     c=st.columns([1,2])
     with c[0]:
-        if u["profile_photo"]:
-            try:
-                st.image(u["profile_photo"],width=180)
-            except Exception:
-                st.caption("Profile photo saved.")
+        if u.get("profile_photo"):
+            try: st.image(u.get("profile_photo"),width=180)
+            except Exception: pass
         photo=st.file_uploader("Profile picture",type=["png","jpg","jpeg"],key="profile_pic")
         if photo is not None:
-            import base64
             data="data:"+photo.type+";base64,"+base64.b64encode(photo.getvalue()).decode()
-            execute("UPDATE app_users SET profile_photo=?,updated_at=? WHERE id=?",
-                    (data,datetime.now().isoformat(timespec="seconds"),u["id"]))
+            if is_member:
+                updated=_central_update_member(u["id"],{"profile_photo":data,"updated_at":datetime.now().isoformat(timespec="seconds")})
+                if updated: st.session_state["_chaplife_member_profile"]=updated[0]
+            else:
+                execute("UPDATE app_users SET profile_photo=?,updated_at=? WHERE id=?",
+                        (data,datetime.now().isoformat(timespec="seconds"),u["id"]))
             st.rerun()
 
     with c[1]:
-        gender_saved=get_setting(f"user_{u['id']}_gender","Prefer not to say")
+        gender_saved=get_setting("profile_gender","Prefer not to say")
         gender_opts=["Woman","Man","Non-binary","Prefer not to say","Custom"]
         gender_idx=gender_opts.index(gender_saved) if gender_saved in gender_opts else gender_opts.index("Custom")
-
-        birth_saved=get_setting(f"user_{u['id']}_birthdate","")
-        height_saved=get_setting(f"user_{u['id']}_height","")
-        workout_goal_saved=get_setting(f"user_{u['id']}_workout_goal","")
-        activity_saved=get_setting(f"user_{u['id']}_activity_level","")
+        birth_saved=get_setting("profile_birthdate","")
+        height_saved=get_setting("profile_height","")
+        workout_goal_saved=get_setting("profile_workout_goal","")
+        activity_saved=get_setting("profile_activity_level","")
 
         with st.form("profile_form"):
-            display=st.text_input("Name / display name",value=u["display_name"] or "")
-            username=st.text_input(
-                "Optional username for login",
-                value=u["username"] or "",
-                help="You can keep using your PIN, or create a username to use for login later."
-            )
+            display=st.text_input("Name / display name",value=u.get("display_name") or "")
+            username=st.text_input("Username (optional)",value=u.get("username") or "",
+                                   help="If blank, you can use your full name when signing in.")
             gender=st.selectbox("Gender",gender_opts,index=gender_idx)
             gender_custom=""
             if gender=="Custom":
@@ -199,198 +260,327 @@ def user_access_center():
                                             value=gender_saved if gender_saved not in gender_opts else "")
             birthdate=st.text_input("Birthday (optional)",value=birth_saved,placeholder="MM/DD/YYYY")
             height=st.text_input("Height (optional)",value=height_saved,placeholder="Example: 5'4\"")
-            activity=st.selectbox(
-                "Current activity level",
-                ["","Mostly sedentary","Lightly active","Moderately active","Very active"],
-                index=["","Mostly sedentary","Lightly active","Moderately active","Very active"].index(activity_saved)
-                if activity_saved in ["","Mostly sedentary","Lightly active","Moderately active","Very active"] else 0
-            )
-            workout_goal=st.text_input(
-                "Main fitness / workout goal",
-                value=workout_goal_saved,
-                placeholder="Example: lose weight, build glutes, get stronger, improve stamina"
-            )
-            bio=st.text_area("Short bio (optional)",value=u["bio"] or "",height=90)
-            visible=st.toggle(
-                "Allow my profile to be visible in future social features",
-                value=bool(u["profile_visible"]),
-                help="This only controls future profile visibility. It does not make your finances, health, weight, cycle, calendar, or other private data public."
-            )
-            if st.form_submit_button("Save Profile",use_container_width=True):
+            activity_opts=["","Mostly sedentary","Lightly active","Moderately active","Very active"]
+            activity=st.selectbox("Current activity level",activity_opts,
+                                  index=activity_opts.index(activity_saved) if activity_saved in activity_opts else 0)
+            workout_goal=st.text_input("Main fitness / workout goal",value=workout_goal_saved,
+                                       placeholder="Lose weight, build strength, improve stamina…")
+            bio=st.text_area("Short bio (optional)",value=u.get("bio") or "",height=90)
+            visible=st.toggle("Allow my profile to be visible in future social features",
+                              value=bool(u.get("profile_visible",False)))
+            save=st.form_submit_button("Save Profile",use_container_width=True)
+            if save:
                 try:
-                    execute("""UPDATE app_users SET display_name=?,username=?,bio=?,profile_visible=?,updated_at=?
-                               WHERE id=?""",
-                            (display,username.strip() or None,bio,1 if visible else 0,
-                             datetime.now().isoformat(timespec="seconds"),u["id"]))
-                    set_setting(f"user_{u['id']}_gender", gender_custom.strip() if gender=="Custom" and gender_custom.strip() else gender)
-                    set_setting(f"user_{u['id']}_birthdate", birthdate.strip())
-                    set_setting(f"user_{u['id']}_height", height.strip())
-                    set_setting(f"user_{u['id']}_activity_level", activity)
-                    set_setting(f"user_{u['id']}_workout_goal", workout_goal.strip())
+                    if is_member:
+                        uname=username.strip().lower() or None
+                        if uname:
+                            existing=_admin_http_json(
+                                f"/rest/v1/chaplife_members?username=eq.{urllib.parse.quote(uname)}&id=neq.{urllib.parse.quote(str(u['id']))}&select=id"
+                            )
+                            if existing:
+                                st.error("That username is already being used.")
+                                st.stop()
+                        updated=_central_update_member(u["id"],{
+                            "display_name":display.strip(),"normalized_name":_norm_name(display),
+                            "username":uname,"bio":bio,"profile_visible":bool(visible),
+                            "updated_at":datetime.now().isoformat(timespec="seconds")
+                        })
+                        if updated: st.session_state["_chaplife_member_profile"]=updated[0]
+                    else:
+                        execute("""UPDATE app_users SET display_name=?,username=?,bio=?,profile_visible=?,updated_at=? WHERE id=?""",
+                                (display,username.strip() or None,bio,1 if visible else 0,
+                                 datetime.now().isoformat(timespec="seconds"),u["id"]))
+                    set_setting("profile_gender",gender_custom.strip() if gender=="Custom" and gender_custom.strip() else gender)
+                    set_setting("profile_birthdate",birthdate.strip())
+                    set_setting("profile_height",height.strip())
+                    set_setting("profile_activity_level",activity)
+                    set_setting("profile_workout_goal",workout_goal.strip())
                     st.success("Profile updated.")
                     st.rerun()
                 except Exception:
-                    st.error("That username is already in use.")
+                    st.error("Profile could not be updated.")
 
     st.divider()
     st.subheader("Login & Security")
-    st.info(f"Your ChapLife PIN: **{u['pin']}**")
-    with st.form("set_password"):
-        p1=st.text_input("Create / change password",type="password")
-        p2=st.text_input("Confirm password",type="password")
-        if st.form_submit_button("Save Password",use_container_width=True):
-            if len(p1)<6:
-                st.error("Use at least 6 characters.")
-            elif p1!=p2:
-                st.error("Passwords do not match.")
-            else:
-                execute("UPDATE app_users SET password_hash=?,updated_at=? WHERE id=?",
-                        (_hash_password(p1),datetime.now().isoformat(timespec="seconds"),u["id"]))
-                st.success("Password updated.")
+    if is_member:
+        with st.form("member_change_password"):
+            old=st.text_input("Current password",type="password")
+            p1=st.text_input("New password",type="password")
+            p2=st.text_input("Confirm new password",type="password")
+            if st.form_submit_button("Change Password",use_container_width=True):
+                fresh=_central_member_by_id(u["id"])
+                if not _member_password_ok(old,fresh.get("password_hash","")):
+                    st.error("Current password doesn't match.")
+                elif len(p1)<8:
+                    st.warning("Use at least 8 characters.")
+                elif p1!=p2:
+                    st.warning("Passwords do not match.")
+                else:
+                    _central_update_member(u["id"],{
+                        "password_hash":_member_password_hash(p1),
+                        "updated_at":datetime.now().isoformat(timespec="seconds")
+                    })
+                    st.success("Password changed.")
+    else:
+        st.caption("Owner login remains connected to the private cloud account.")
 
     cloud_cols=st.columns(2)
     if cloud_cols[0].button("↕ Sync now",use_container_width=True,key="profile_manual_cloud_sync"):
         try:
-            cloud_push_db()
-            st.success("Synced.")
+            cloud_push_db(); st.success("Synced.")
         except Exception:
             st.warning("Cloud sync needs attention.")
     if cloud_cols[1].button("Sign out",use_container_width=True,key="profile_cloud_signout"):
-        cloud_logout()
-        st.rerun()
+        cloud_logout(); st.rerun()
 
     st.divider()
     st.subheader("Optional Health Features")
-    cycle_current=get_setting(f"user_{u['id']}_cycle_mode","My cycle")
+    cycle_current=get_setting("profile_cycle_mode","My cycle")
     cycle_choices=["My cycle","Partner cycle","Hide cycle tracking"]
-    mode=st.selectbox(
-        "Cycle tracking",
-        cycle_choices,
-        index=cycle_choices.index(cycle_current) if cycle_current in cycle_choices else 0
-    )
+    mode=st.selectbox("Cycle tracking",cycle_choices,
+                      index=cycle_choices.index(cycle_current) if cycle_current in cycle_choices else 0)
     if mode=="Partner cycle":
         st.caption("Only track a partner's health information with their permission.")
     if st.button("Save Health Feature Choices",use_container_width=True,key="save_profile_modules"):
-        set_setting(f"user_{u['id']}_cycle_mode",mode)
-        st.success("Saved.")
+        set_setting("profile_cycle_mode",mode); st.success("Saved.")
 
     st.divider()
     feature_request_center(embedded=True)
 
-    st.divider()
-    st.subheader("Account")
-    confirm=st.checkbox("I understand this disables my ChapLife account.",key="confirm_delete_self")
-    if st.button("Delete My Account",disabled=not confirm,use_container_width=True,key="delete_self_account"):
-        execute("UPDATE app_users SET active=0 WHERE id=?",(u["id"],))
-        st.session_state.pop("chaplife_user_id",None)
-        st.success("Account disabled.")
+    if is_member:
+        st.divider()
+        st.subheader("Delete My Account")
+        st.caption("This permanently removes your ChapLife account and private cloud data.")
+        typed=st.text_input("Type DELETE to confirm",key="self_delete_text")
+        if st.button("Delete My Account",disabled=typed.strip().upper()!="DELETE",
+                     use_container_width=True,key="delete_self_account"):
+            mid=u["id"]
+            _admin_http_json(f"/rest/v1/chaplife_user_state?member_id=eq.{urllib.parse.quote(str(mid))}","DELETE")
+            _admin_http_json(f"/rest/v1/chaplife_feature_requests?member_id=eq.{urllib.parse.quote(str(mid))}","DELETE")
+            _admin_http_json(f"/rest/v1/chaplife_members?id=eq.{urllib.parse.quote(str(mid))}","DELETE")
+            path=current_db_path()
+            try:
+                if path.exists(): path.unlink()
+            except Exception: pass
+            cloud_logout(); st.rerun()
 
 def feature_request_center(embedded=False):
-    if embedded:
-        st.subheader("🛠️ Request Something From Chennel")
-    else:
-        st.title("🛠️ Request Something From Chennel")
+    if embedded: st.subheader("🛠️ Request Something From Chennel")
+    else: st.title("🛠️ Request Something From Chennel")
     u=_current_user()
-    st.write("Describe exactly what you want ChapLife to do. The more specific you are, the easier it is to build it the way you pictured it.")
+    st.write("Tell me what you want ChapLife to do. These questions are designed to capture enough detail to build it correctly.")
     with st.form("feature_request_form",clear_on_submit=True):
-        area=st.selectbox("Where should this go?",[
-            "Finances","Health","Trainer","Food","Calendar","Profile","Shared Spaces","Home","Other"
-        ])
-        goal=st.text_area("What are you trying to accomplish?",height=90,
-                          placeholder="Example: I want to split vacation costs with 3 friends and see who still owes what.")
+        area=st.selectbox("Where should this go?",["Finances","Health","Trainer","Food","Calendar","Profile","Shared Spaces","Home","Other"])
+        goal=st.text_area("What are you trying to accomplish?",height=90)
         current=st.text_area("What happens now?",height=75)
         desired=st.text_area("Exactly what should happen instead?",height=110)
         trigger=st.text_area("What should happen after you click / enter / save something?",height=90)
-        visibility=st.selectbox("Who should be able to see it?",[
-            "Only me","People I invite","Everyone in a shared space","All ChapLife users","Owner/admin only"
-        ])
+        visibility=st.selectbox("Who should be able to see it?",["Only me","People I invite","Everyone in a shared space","All ChapLife users","Owner/admin only"])
         inputs=st.text_area("What information should ChapLife ask you for?",height=90)
         details=st.text_area("Anything else that matters? Include examples, calculations, rules, wording, colors, or layout.",height=120)
         priority=st.selectbox("How important is this to you?",["Low","Normal","High"])
         if st.form_submit_button("Send Request",use_container_width=True):
-            execute("""INSERT INTO feature_requests(user_id,created_at,area,goal,current_behavior,desired_behavior,
-                       trigger_action,visibility_scope,required_inputs,details,priority,status)
-                       VALUES(?,?,?,?,?,?,?,?,?,?,?,'Submitted')""",
-                    (u["id"] if u else None,datetime.now().isoformat(timespec="seconds"),area,goal,current,
-                     desired,trigger,visibility,inputs,details,priority))
-            st.success("Sent to Chennel.")
+            if not goal.strip() or not desired.strip():
+                st.warning("Tell me your goal and exactly what you want ChapLife to do.")
+            elif st.session_state.get("_chaplife_member_id") and MULTIUSER_CONFIGURED:
+                now=datetime.now().isoformat(timespec="seconds")
+                _admin_http_json("/rest/v1/chaplife_feature_requests","POST",{
+                    "member_id":str(u["id"]),"display_name":u.get("display_name") or "",
+                    "created_at":now,"area":area,"goal":goal,"current_behavior":current,
+                    "desired_behavior":desired,"trigger_action":trigger,"visibility_scope":visibility,
+                    "required_inputs":inputs,"details":details,"priority":priority,"status":"Submitted"
+                },{"Prefer":"return=minimal"})
+                st.success("Sent to Chennel.")
+            else:
+                execute("""INSERT INTO feature_requests(user_id,created_at,area,goal,current_behavior,desired_behavior,
+                           trigger_action,visibility_scope,required_inputs,details,priority,status)
+                           VALUES(?,?,?,?,?,?,?,?,?,?,?,'Submitted')""",
+                        (u["id"] if u else None,datetime.now().isoformat(timespec="seconds"),area,goal,current,
+                         desired,trigger,visibility,inputs,details,priority))
+                st.success("Saved.")
 
-    mine=rows("SELECT * FROM feature_requests WHERE user_id=? ORDER BY id DESC",(u["id"],)) if u else []
-    if mine:
-        st.subheader("My Requests")
-        st.dataframe(pd.DataFrame([{
-            "Date":us_date(r["created_at"][:10]),
-            "Area":r["area"],
-            "Request":r["goal"],
-            "Priority":r["priority"],
-            "Status":r["status"]
-        } for r in mine]),use_container_width=True,hide_index=True)
+    if st.session_state.get("_chaplife_member_id") and MULTIUSER_CONFIGURED:
+        mine=_admin_http_json(
+            f"/rest/v1/chaplife_feature_requests?member_id=eq.{urllib.parse.quote(str(u['id']))}&select=created_at,area,goal,priority,status&order=created_at.desc"
+        )
+        if mine:
+            st.subheader("My Requests")
+            st.dataframe(pd.DataFrame([{
+                "Date":us_date(r.get("created_at","")[:10]),"Area":r.get("area"),
+                "Request":r.get("goal"),"Priority":r.get("priority"),"Status":r.get("status")
+            } for r in mine]),use_container_width=True,hide_index=True)
 
 def owner_user_management():
     if not _is_owner():
         st.error("Owner access only.")
         return
+
     st.title("🛡️ User Management")
-    st.caption("Manage access without opening anyone else's private ChapLife data.")
-    users=rows("SELECT * FROM app_users ORDER BY id")
-    for u in users:
+    st.caption("Approve access and manage accounts without opening anyone else's private ChapLife data.")
+
+    if not MULTIUSER_CONFIGURED:
+        st.warning("Multi-user setup needs one additional Streamlit secret: SUPABASE_SERVICE_ROLE_KEY.")
+        st.code("SUPABASE_SERVICE_ROLE_KEY = \"your Supabase service_role key\"")
+        st.info("Run the ChapLife 7.1 Supabase setup SQL first, then add the service-role key to Streamlit Secrets.")
+        return
+
+    # Shared invitation PIN
+    with st.container(border=True):
+        st.subheader("Shared ChapLife Access PIN")
+        st.write("Everyone uses this PIN only for their first access request. Approved users use their own password afterward.")
+        current_pin=_shared_access_pin()
+        with st.form("shared_pin_settings"):
+            pin=st.text_input("Shared access PIN",value=current_pin,type="password",
+                              help="Changing this does not affect users who are already approved.")
+            if st.form_submit_button("Save Shared PIN",use_container_width=True):
+                if len(pin.strip())<4:
+                    st.warning("Use at least 4 characters.")
+                else:
+                    _set_shared_access_pin(pin.strip())
+                    st.success("Shared access PIN updated.")
+
+    # Pending
+    pending=_admin_http_json("/rest/v1/chaplife_members?status=eq.pending&select=*&order=created_at.asc")
+    st.subheader(f"Pending Requests ({len(pending)})")
+    if not pending:
+        st.caption("No one is waiting for approval.")
+    for p in pending:
         with st.container(border=True):
-            c=st.columns([2,1,1,1])
-            c[0].markdown(f"**{_safe_display_name(u)}**  \n@{u['username']} · PIN {u['pin']} · {u['role']}")
-            c[1].write("Active" if u["active"] else "Disabled")
-            c[2].write("Profile visible" if u["profile_visible"] else "Private profile")
-            if u["role"]!="owner":
-                if c[3].button("Disable" if u["active"] else "Enable",key=f"toggle_user_{u['id']}"):
-                    execute("UPDATE app_users SET active=? WHERE id=?",(0 if u["active"] else 1,u["id"]))
+            c=st.columns([3,1,1])
+            c[0].markdown(f"**{p.get('display_name','Unnamed')}**  \nRequested {us_date(str(p.get('created_at',''))[:10])}")
+            if c[1].button("✓ Approve",key=f"approve_{p['id']}",use_container_width=True):
+                _central_update_member(p["id"],{
+                    "status":"approved","active":True,
+                    "approved_at":datetime.now().isoformat(timespec="seconds"),
+                    "updated_at":datetime.now().isoformat(timespec="seconds")
+                })
+                st.rerun()
+            if c[2].button("Reject",key=f"reject_{p['id']}",use_container_width=True):
+                _central_update_member(p["id"],{
+                    "status":"rejected","active":False,
+                    "updated_at":datetime.now().isoformat(timespec="seconds")
+                })
+                st.rerun()
+
+    # Pre-approved names
+    st.subheader("Pre-Approved People")
+    st.caption("Add someone here before they join and they will get instant approval when their name matches.")
+    with st.form("preapprove_person",clear_on_submit=True):
+        name=st.text_input("Full name")
+        if st.form_submit_button("Add Pre-Approved Person",use_container_width=True):
+            if not name.strip():
+                st.warning("Enter their name.")
+            else:
+                norm=_norm_name(name)
+                existing=_admin_http_json(
+                    f"/rest/v1/chaplife_members?normalized_name=eq.{urllib.parse.quote(norm)}&select=*"
+                )
+                now=datetime.now().isoformat(timespec="seconds")
+                if existing:
+                    _central_update_member(existing[0]["id"],{
+                        "display_name":name.strip(),"normalized_name":norm,
+                        "status":"preapproved","active":True,"updated_at":now
+                    })
+                else:
+                    _admin_http_json("/rest/v1/chaplife_members","POST",{
+                        "display_name":name.strip(),"normalized_name":norm,"status":"preapproved",
+                        "role":"member","active":True,"profile_visible":False,
+                        "created_at":now,"updated_at":now
+                    },{"Prefer":"return=minimal"})
+                st.success(f"{name.strip()} is pre-approved.")
+                st.rerun()
+
+    pre=_admin_http_json("/rest/v1/chaplife_members?status=eq.preapproved&select=*&order=display_name.asc")
+    for p in pre:
+        with st.container(border=True):
+            c=st.columns([4,1])
+            c[0].markdown(f"**{p.get('display_name')}**  \n<span class='chap-status'>Waiting to join</span>",unsafe_allow_html=True)
+            if c[1].button("Remove",key=f"remove_pre_{p['id']}",use_container_width=True):
+                _admin_http_json(f"/rest/v1/chaplife_members?id=eq.{urllib.parse.quote(str(p['id']))}","DELETE")
+                st.rerun()
+
+    # Active users
+    active=_admin_http_json("/rest/v1/chaplife_members?status=eq.approved&select=*&order=display_name.asc")
+    st.subheader(f"Active Users ({len(active)})")
+    if not active:
+        st.caption("No friend accounts are active yet.")
+    for p in active:
+        with st.container(border=True):
+            c=st.columns([3,1,1])
+            username=f"@{p.get('username')}" if p.get("username") else "uses name to sign in"
+            c[0].markdown(f"**{p.get('display_name','Unnamed')}**  \n{username}")
+            c[1].markdown("**Active**" if p.get("active",True) else "**Disabled**")
+            toggle="Disable" if p.get("active",True) else "Enable"
+            if c[2].button(toggle,key=f"toggle_member_{p['id']}",use_container_width=True):
+                _central_update_member(p["id"],{
+                    "active":not bool(p.get("active",True)),
+                    "updated_at":datetime.now().isoformat(timespec="seconds")
+                })
+                st.rerun()
+
+            actions=st.columns(2)
+            if actions[0].button("Reset Password",key=f"reset_member_{p['id']}",use_container_width=True):
+                _central_update_member(p["id"],{
+                    "password_hash":None,
+                    "status":"preapproved",
+                    "active":True,
+                    "updated_at":datetime.now().isoformat(timespec="seconds")
+                })
+                st.success(f"{p.get('display_name')} can use the shared PIN again to create a new password.")
+                st.rerun()
+
+            confirm_key=f"delete_confirm_{p['id']}"
+            if confirm_key not in st.session_state: st.session_state[confirm_key]=False
+            if not st.session_state[confirm_key]:
+                if actions[1].button("Delete Account",key=f"delete_member_{p['id']}",use_container_width=True):
+                    st.session_state[confirm_key]=True
                     st.rerun()
+            else:
+                st.warning(f"Permanently delete {p.get('display_name')} and their private ChapLife data?")
                 cc=st.columns(2)
-                if cc[0].button("Reset Password",key=f"reset_pw_{u['id']}"):
-                    execute("UPDATE app_users SET password_hash='' WHERE id=?",(u["id"],))
-                    st.success("Password reset. They can create a new one.")
-                if cc[1].button("Delete Account",key=f"del_user_{u['id']}"):
-                    execute("DELETE FROM app_users WHERE id=?",(u["id"],))
+                if cc[0].button("Yes, delete permanently",key=f"delete_yes_{p['id']}",use_container_width=True):
+                    mid=str(p["id"])
+                    _admin_http_json(f"/rest/v1/chaplife_user_state?member_id=eq.{urllib.parse.quote(mid)}","DELETE")
+                    _admin_http_json(f"/rest/v1/chaplife_feature_requests?member_id=eq.{urllib.parse.quote(mid)}","DELETE")
+                    _admin_http_json(f"/rest/v1/chaplife_members?id=eq.{urllib.parse.quote(mid)}","DELETE")
+                    st.session_state.pop(confirm_key,None)
+                    st.rerun()
+                if cc[1].button("Cancel",key=f"delete_no_{p['id']}",use_container_width=True):
+                    st.session_state[confirm_key]=False
                     st.rerun()
 
-    st.divider()
-    st.subheader("Create Friend Account")
-    with st.form("create_friend",clear_on_submit=True):
-        c=st.columns(2)
-        display=c[0].text_input("Display name")
-        username=c[1].text_input("Username")
-        if st.form_submit_button("Create Account + PIN",use_container_width=True):
-            now=datetime.now().isoformat(timespec="seconds")
-            try:
-                pin=_new_pin()
-                execute("""INSERT INTO app_users(pin,username,display_name,password_hash,role,active,profile_visible,bio,created_at,updated_at)
-                           VALUES(?,?,?,?,?,?,?,?,?,?)""",
-                        (pin,username.strip(),display.strip(),"",'member',1,0,"",now,now))
-                uid=rows("SELECT id FROM app_users WHERE username=?",(username.strip(),))[0]["id"]
-                # clean provider defaults; no personal balances/history are copied
-                for i,(k,n) in enumerate([("paycheck","Paycheck"),("plan","Plan"),("savings","Savings"),
-                                          ("cards","Cards & Debt"),("bills","Bills & Spending"),
-                                          ("reports","Reports"),("money_settings","Money Settings")]):
-                    execute("""INSERT INTO finance_providers(user_id,provider_key,display_name,sort_order,active)
-                               VALUES(?,?,?,?,1)""",(uid,k,n,i))
-                st.success(f"Account created. PIN: {pin}")
-            except Exception:
-                st.error("That username is already in use.")
+    rejected=_admin_http_json("/rest/v1/chaplife_members?status=eq.rejected&select=*&order=updated_at.desc")
+    if rejected:
+        with st.expander(f"Rejected Requests ({len(rejected)})"):
+            for p in rejected:
+                cc=st.columns([3,1,1])
+                cc[0].write(p.get("display_name"))
+                if cc[1].button("Approve",key=f"approve_rejected_{p['id']}"):
+                    _central_update_member(p["id"],{"status":"approved","active":True,"updated_at":datetime.now().isoformat(timespec="seconds")})
+                    st.rerun()
+                if cc[2].button("Delete",key=f"delete_rejected_{p['id']}"):
+                    _admin_http_json(f"/rest/v1/chaplife_members?id=eq.{urllib.parse.quote(str(p['id']))}","DELETE")
+                    st.rerun()
 
-    reqs=rows("""SELECT fr.*,u.display_name,u.username FROM feature_requests fr
-                 LEFT JOIN app_users u ON u.id=fr.user_id ORDER BY fr.id DESC""")
+    # Central feature requests from friends
+    reqs=_admin_http_json("/rest/v1/chaplife_feature_requests?select=*&order=created_at.desc")
     if reqs:
         st.divider()
         st.subheader("Feature Requests")
         for r in reqs:
-            with st.expander(f"{r['area']} · {_safe_display_name(r)} · {r['status']}"):
-                st.write(r["goal"])
-                st.caption(r["details"] or "")
-                status=st.selectbox("Status",["Submitted","Reviewing","Planned","Added","Can't Add"],
-                                    index=["Submitted","Reviewing","Planned","Added","Can't Add"].index(r["status"])
-                                    if r["status"] in ["Submitted","Reviewing","Planned","Added","Can't Add"] else 0,
-                                    key=f"req_status_{r['id']}")
-                note=st.text_area("Owner note",value=r["owner_note"] or "",key=f"req_note_{r['id']}")
-                if st.button("Save Request Update",key=f"save_req_{r['id']}"):
-                    execute("UPDATE feature_requests SET status=?,owner_note=? WHERE id=?",(status,note,r["id"]))
+            with st.expander(f"{r.get('area')} · {r.get('display_name') or 'ChapLife user'} · {r.get('status')}"):
+                st.write(r.get("goal") or "")
+                st.caption(r.get("details") or "")
+                statuses=["Submitted","Reviewing","Planned","Added","Can't Add"]
+                status=st.selectbox("Status",statuses,
+                                    index=statuses.index(r.get("status")) if r.get("status") in statuses else 0,
+                                    key=f"central_req_status_{r['id']}")
+                note=st.text_area("Owner note",value=r.get("owner_note") or "",key=f"central_req_note_{r['id']}")
+                if st.button("Save Request Update",key=f"central_req_save_{r['id']}"):
+                    _admin_http_json(
+                        f"/rest/v1/chaplife_feature_requests?id=eq.{urllib.parse.quote(str(r['id']))}",
+                        "PATCH",{"status":status,"owner_note":note},{"Prefer":"return=minimal"}
+                    )
                     st.rerun()
 
 def finance_provider_settings():
@@ -665,7 +855,84 @@ def _secret(name, default=""):
 
 SUPABASE_URL=_secret("SUPABASE_URL").rstrip("/")
 SUPABASE_KEY=_secret("SUPABASE_PUBLISHABLE_KEY")
+SUPABASE_SERVICE_ROLE_KEY=_secret("SUPABASE_SERVICE_ROLE_KEY")
 CLOUD_CONFIGURED=bool(SUPABASE_URL and SUPABASE_KEY)
+MULTIUSER_CONFIGURED=bool(SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY)
+
+def _admin_http_json(path, method="GET", payload=None, extra_headers=None):
+    if not MULTIUSER_CONFIGURED:
+        raise RuntimeError("ChapLife multi-user service is not configured yet.")
+    url=f"{SUPABASE_URL}{path}"
+    headers={
+        "apikey":SUPABASE_SERVICE_ROLE_KEY,
+        "Authorization":"Bearer "+SUPABASE_SERVICE_ROLE_KEY,
+        "Content-Type":"application/json"
+    }
+    if extra_headers: headers.update(extra_headers)
+    data=None if payload is None else json.dumps(payload).encode("utf-8")
+    req=urllib.request.Request(url,data=data,headers=headers,method=method)
+    try:
+        with urllib.request.urlopen(req,timeout=20) as r:
+            raw=r.read().decode("utf-8")
+            return json.loads(raw) if raw else {}
+    except urllib.error.HTTPError as e:
+        body=e.read().decode("utf-8",errors="ignore")
+        try:
+            detail=json.loads(body)
+            msg=detail.get("message") or detail.get("hint") or detail.get("details") or body
+        except Exception:
+            msg=body or str(e)
+        raise RuntimeError(msg)
+
+def _norm_name(v):
+    return " ".join(re.sub(r"[^a-z0-9 ]+"," ",str(v or "").lower()).split())
+
+def _member_password_hash(password, salt=None):
+    salt=salt or secrets.token_hex(16)
+    rounds=240000
+    digest=hashlib.pbkdf2_hmac("sha256",str(password).encode(),salt.encode(),rounds).hex()
+    return f"pbkdf2_sha256${rounds}${salt}${digest}"
+
+def _member_password_ok(password, stored):
+    try:
+        scheme,rounds,salt,digest=str(stored).split("$",3)
+        if scheme!="pbkdf2_sha256": return False
+        check=hashlib.pbkdf2_hmac("sha256",str(password).encode(),salt.encode(),int(rounds)).hex()
+        return hmac.compare_digest(check,digest)
+    except Exception:
+        return False
+
+def _central_members(filters="", select="*"):
+    suffix=("&"+filters) if filters else ""
+    return _admin_http_json(f"/rest/v1/chaplife_members?select={urllib.parse.quote(select,safe='*,()')}{suffix}")
+
+def _central_member_by_id(member_id):
+    data=_admin_http_json(f"/rest/v1/chaplife_members?id=eq.{urllib.parse.quote(str(member_id))}&select=*")
+    return data[0] if data else None
+
+def _central_update_member(member_id, payload):
+    return _admin_http_json(
+        f"/rest/v1/chaplife_members?id=eq.{urllib.parse.quote(str(member_id))}",
+        "PATCH",payload,{"Prefer":"return=representation"}
+    )
+
+def _shared_access_pin():
+    try:
+        data=_admin_http_json("/rest/v1/chaplife_config?config_key=eq.shared_access_pin&select=config_value")
+        return str(data[0].get("config_value","")).strip() if data else ""
+    except Exception:
+        return ""
+
+def _set_shared_access_pin(pin):
+    return _admin_http_json(
+        "/rest/v1/chaplife_config?on_conflict=config_key","POST",
+        {"config_key":"shared_access_pin","config_value":str(pin).strip(),"updated_at":datetime.now().isoformat(timespec="seconds")},
+        {"Prefer":"resolution=merge-duplicates,return=representation"}
+    )
+
+def _member_sign_out():
+    for k in ["_chaplife_member_id","_chaplife_member_profile","_cloud_loaded","_cloud_last_sync","_cloud_sync_error"]:
+        st.session_state.pop(k,None)
 
 def _http_json(url, method="GET", payload=None, token=None, extra_headers=None):
     headers={"apikey":SUPABASE_KEY,"Content-Type":"application/json"}
@@ -708,6 +975,29 @@ def _cloud_headers():
     return s.get("access_token"),s.get("user",{}).get("id")
 
 def cloud_pull_db():
+    member_id=st.session_state.get("_chaplife_member_id")
+    path=current_db_path()
+    if member_id:
+        st.session_state["_cloud_loading"]=True
+        try:
+            result=_admin_http_json(
+                f"/rest/v1/chaplife_user_state?member_id=eq.{urllib.parse.quote(str(member_id))}&select=db_blob,updated_at"
+            )
+            if result and result[0].get("db_blob"):
+                blob=base64.b64decode(result[0]["db_blob"].encode("ascii"))
+                tmp=path.with_suffix(".cloudtmp")
+                tmp.write_bytes(blob)
+                conn=sqlite3.connect(tmp)
+                conn.execute("SELECT name FROM sqlite_master LIMIT 1").fetchone()
+                conn.close()
+                tmp.replace(path)
+                init_db()
+                st.session_state["_cloud_last_sync"]=result[0].get("updated_at","")
+                return True
+            return False
+        finally:
+            st.session_state["_cloud_loading"]=False
+
     token,uid=_cloud_headers()
     if not token or not uid: return False
     st.session_state["_cloud_loading"]=True
@@ -716,13 +1006,12 @@ def cloud_pull_db():
         result=_http_json(url,token=token)
         if result and result[0].get("db_blob"):
             blob=base64.b64decode(result[0]["db_blob"].encode("ascii"))
-            tmp=DB_PATH.with_suffix(".cloudtmp")
+            tmp=path.with_suffix(".cloudtmp")
             tmp.write_bytes(blob)
-            # Validate downloaded DB before replacing local state.
             conn=sqlite3.connect(tmp)
             conn.execute("SELECT name FROM sqlite_master LIMIT 1").fetchone()
             conn.close()
-            tmp.replace(DB_PATH)
+            tmp.replace(path)
             init_db()
             st.session_state["_cloud_last_sync"]=result[0].get("updated_at","")
             return True
@@ -732,17 +1021,32 @@ def cloud_pull_db():
 
 def cloud_push_db():
     if st.session_state.get("_cloud_loading"): return False
+    path=current_db_path()
+    member_id=st.session_state.get("_chaplife_member_id")
+
+    if member_id:
+        if not path.exists(): return False
+        try:
+            c=db(); c.execute("PRAGMA wal_checkpoint(FULL)"); c.close()
+        except Exception:
+            pass
+        blob=base64.b64encode(path.read_bytes()).decode("ascii")
+        payload={"member_id":str(member_id),"db_blob":blob,"updated_at":datetime.now().isoformat(timespec="seconds")}
+        _admin_http_json(
+            "/rest/v1/chaplife_user_state?on_conflict=member_id","POST",payload,
+            {"Prefer":"resolution=merge-duplicates,return=minimal"}
+        )
+        st.session_state["_cloud_last_sync"]="just now"
+        return True
+
     token,uid=_cloud_headers()
-    if not token or not uid or not DB_PATH.exists(): return False
-    # Checkpoint database into a consistent file before encoding.
+    if not token or not uid or not path.exists(): return False
     try:
-        c=db()
-        c.execute("PRAGMA wal_checkpoint(FULL)")
-        c.close()
+        c=db(); c.execute("PRAGMA wal_checkpoint(FULL)"); c.close()
     except Exception:
         pass
-    blob=base64.b64encode(DB_PATH.read_bytes()).decode("ascii")
-    payload={"user_id":uid,"db_blob":blob,"updated_at":datetime.now().astimezone().astimezone().isoformat()}
+    blob=base64.b64encode(path.read_bytes()).decode("ascii")
+    payload={"user_id":uid,"db_blob":blob,"updated_at":datetime.now().isoformat(timespec="seconds")}
     url=f"{SUPABASE_URL}/rest/v1/chaplife_state?on_conflict=user_id"
     _http_json(url,"POST",payload,token,{"Prefer":"resolution=merge-duplicates,return=minimal"})
     st.session_state["_cloud_last_sync"]="just now"
@@ -751,81 +1055,197 @@ def cloud_push_db():
 def _maybe_cloud_push():
     # All existing ChapLife save/delete/update operations pass through set_setting/execute.
     # Once signed in, those writes automatically persist the SQLite state to Supabase.
-    if not CLOUD_CONFIGURED: return
-    if not st.session_state.get("_chaplife_cloud_session"): return
     if st.session_state.get("_cloud_loading"): return
+    if st.session_state.get("_chaplife_member_id"):
+        if not MULTIUSER_CONFIGURED: return
+    else:
+        if not CLOUD_CONFIGURED: return
+        if not st.session_state.get("_chaplife_cloud_session"): return
     try:
         cloud_push_db()
     except Exception as e:
         st.session_state["_cloud_sync_error"]=str(e)
 
 def cloud_logout():
-    for k in ["_chaplife_cloud_session","_cloud_loaded","_cloud_last_sync","_cloud_sync_error"]:
+    for k in ["_chaplife_cloud_session","_chaplife_member_id","_chaplife_member_profile",
+              "_cloud_loaded","_cloud_last_sync","_cloud_sync_error"]:
         st.session_state.pop(k,None)
 
 def cloud_auth_gate():
-    if not CLOUD_CONFIGURED:
-        st.error("Cloud build is running, but Supabase is not fully configured.")
-        st.write("Secret check:")
-        st.write(f"• SUPABASE_URL present: **{'Yes' if bool(SUPABASE_URL) else 'No'}**")
-        st.write(f"• SUPABASE_PUBLISHABLE_KEY present: **{'Yes' if bool(SUPABASE_KEY) else 'No'}**")
-        st.info("Open Streamlit → Manage app → Settings → Secrets, correct the missing entry, save, then reboot the app.")
-        st.stop()
+    # Existing owner session continues to use Supabase Auth.
+    owner_session=st.session_state.get("_chaplife_cloud_session")
+    member_id=st.session_state.get("_chaplife_member_id")
 
-    if not st.session_state.get("_chaplife_cloud_session"):
-        st.markdown('<div class="hero"><h1>✨ ChapLife Cloud</h1><p>Private sign-in • one account • same data on phone and computer.</p></div>',unsafe_allow_html=True)
-        signin,create=st.tabs(["Sign in","Create my ChapLife account"])
-        with signin:
-            with st.form("cloud_signin"):
-                email=st.text_input("Email",key="cloud_email")
-                password=st.text_input("Password",type="password",key="cloud_password")
-                submit=st.form_submit_button("🔐 Sign in to ChapLife",use_container_width=True)
-                if submit:
-                    try:
-                        result=cloud_sign_in(email.strip(),password)
-                        if result.get("access_token"):
-                            st.session_state["_chaplife_cloud_session"]=result
-                            st.session_state["_cloud_loaded"]=False
-                            st.rerun()
+    if not owner_session and not member_id:
+        st.markdown(
+            '<div class="chap-auth-shell"><div class="chap-auth-mark">✨</div>'
+            '<h1>ChapLife</h1><p>Your life, organized around you.</p></div>',
+            unsafe_allow_html=True
+        )
+
+        signin_tab,join_tab=st.tabs(["Sign in","Use access PIN"])
+
+        with signin_tab:
+            if MULTIUSER_CONFIGURED:
+                with st.form("member_signin_form"):
+                    login=st.text_input("Username or name",placeholder="Your username or full name")
+                    password=st.text_input("Password",type="password")
+                    go=st.form_submit_button("Sign in",use_container_width=True)
+                    if go:
+                        key=login.strip()
+                        if not key or not password:
+                            st.warning("Enter your username/name and password.")
                         else:
-                            st.error("Sign-in did not return a session.")
-                    except Exception as e:
-                        st.error("Sign-in failed: "+str(e))
-        with create:
-            st.info("Use an email/password you want for ChapLife. This login protects your personal cloud data.")
-            with st.form("cloud_signup"):
-                email2=st.text_input("Email",key="cloud_signup_email")
-                pw1=st.text_input("Password",type="password",key="cloud_signup_pw1")
-                pw2=st.text_input("Confirm password",type="password",key="cloud_signup_pw2")
-                create_btn=st.form_submit_button("Create ChapLife account",use_container_width=True)
-                if create_btn:
-                    if len(pw1)<8:
-                        st.warning("Use at least 8 characters.")
-                    elif pw1!=pw2:
-                        st.warning("Passwords do not match.")
-                    else:
+                            q=urllib.parse.quote(key.lower())
+                            nq=urllib.parse.quote(_norm_name(key))
+                            data=_admin_http_json(
+                                f"/rest/v1/chaplife_members?or=(username.ilike.{q},normalized_name.eq.{nq})&select=*"
+                            )
+                            match=next((m for m in data if m.get("status")=="approved" and m.get("active",True)),None)
+                            if match and _member_password_ok(password,match.get("password_hash","")):
+                                st.session_state["_chaplife_member_id"]=match["id"]
+                                st.session_state["_chaplife_member_profile"]=match
+                                st.session_state["_cloud_loaded"]=False
+                                st.rerun()
+                            elif match:
+                                st.error("That password doesn't match.")
+                            else:
+                                st.error("No approved ChapLife account matched that sign-in.")
+            else:
+                st.info("Member access will be available after the multi-user Supabase setup is added.")
+
+        with join_tab:
+            if MULTIUSER_CONFIGURED:
+                with st.form("shared_pin_join"):
+                    pin=st.text_input("ChapLife access PIN",type="password")
+                    full_name=st.text_input("Your full name")
+                    continue_btn=st.form_submit_button("Continue",use_container_width=True)
+                    if continue_btn:
+                        expected=_shared_access_pin()
+                        if not expected:
+                            st.warning("The ChapLife owner hasn't set the shared access PIN yet.")
+                        elif not hmac.compare_digest(str(pin).strip(),expected):
+                            st.error("That access PIN isn't correct.")
+                        elif not full_name.strip():
+                            st.warning("Enter your name.")
+                        else:
+                            norm=_norm_name(full_name)
+                            found=_admin_http_json(
+                                f"/rest/v1/chaplife_members?normalized_name=eq.{urllib.parse.quote(norm)}&select=*"
+                            )
+                            person=found[0] if found else None
+                            if person and person.get("status")=="rejected":
+                                st.error("This access request was not approved.")
+                            elif person and person.get("status")=="disabled":
+                                st.error("This account is currently disabled.")
+                            elif person and person.get("status") in ("preapproved","approved"):
+                                if person.get("status")=="preapproved":
+                                    updated=_central_update_member(person["id"],{
+                                        "status":"approved","active":True,
+                                        "approved_at":datetime.now().isoformat(timespec="seconds"),
+                                        "updated_at":datetime.now().isoformat(timespec="seconds")
+                                    })
+                                    person=(updated[0] if updated else _central_member_by_id(person["id"]))
+                                st.session_state["_finish_member_setup"]=person["id"]
+                                st.rerun()
+                            elif person and person.get("status")=="pending":
+                                st.info("Your request is still waiting for approval.")
+                            else:
+                                now=datetime.now().isoformat(timespec="seconds")
+                                created=_admin_http_json(
+                                    "/rest/v1/chaplife_members","POST",
+                                    {"display_name":full_name.strip(),"normalized_name":norm,"status":"pending",
+                                     "role":"member","active":True,"profile_visible":False,
+                                     "created_at":now,"updated_at":now},
+                                    {"Prefer":"return=representation"}
+                                )
+                                st.success("Request sent. Chennel can approve or reject it from ChapLife.")
+            else:
+                st.info("Member access will be available after the multi-user Supabase setup is added.")
+
+        # Owner access is intentionally unobtrusive.
+        with st.expander("Owner sign in"):
+            if not CLOUD_CONFIGURED:
+                st.warning("Owner cloud sign-in is not configured.")
+            else:
+                with st.form("owner_cloud_signin"):
+                    email=st.text_input("Owner email")
+                    password=st.text_input("Owner password",type="password")
+                    submit=st.form_submit_button("Owner sign in",use_container_width=True)
+                    if submit:
                         try:
-                            result=cloud_sign_up(email2.strip(),pw1)
+                            result=cloud_sign_in(email.strip(),password)
                             if result.get("access_token"):
                                 st.session_state["_chaplife_cloud_session"]=result
                                 st.session_state["_cloud_loaded"]=False
                                 st.rerun()
                             else:
-                                st.success("Account created. Supabase may require email confirmation. Check your email, confirm it, then use the Sign in tab.")
-                        except Exception as e:
-                            st.error("Account creation failed: "+str(e))
+                                st.error("Sign-in did not return a session.")
+                        except Exception:
+                            st.error("Owner sign-in failed.")
         st.stop()
 
+    # A pre-approved or newly-approved member completes account setup once.
+    finish_id=st.session_state.get("_finish_member_setup")
+    if finish_id and not owner_session and not member_id:
+        person=_central_member_by_id(finish_id)
+        if not person:
+            st.session_state.pop("_finish_member_setup",None)
+            st.rerun()
+        st.markdown(
+            '<div class="chap-auth-shell"><div class="chap-auth-mark">👋</div>'
+            f'<h1>Welcome, {html.escape(person.get("display_name") or "friend")}</h1>'
+            '<p>Create your private ChapLife login.</p></div>',unsafe_allow_html=True
+        )
+        with st.form("finish_member_setup_form"):
+            username=st.text_input("Username (optional)",value=person.get("username") or "",
+                                   help="You can sign in with your full name if you don't want a username.")
+            pw1=st.text_input("Create password",type="password")
+            pw2=st.text_input("Confirm password",type="password")
+            done=st.form_submit_button("Create my ChapLife",use_container_width=True)
+            if done:
+                if len(pw1)<8:
+                    st.warning("Use at least 8 characters.")
+                elif pw1!=pw2:
+                    st.warning("Passwords do not match.")
+                else:
+                    uname=username.strip().lower() or None
+                    if uname:
+                        existing=_admin_http_json(
+                            f"/rest/v1/chaplife_members?username=eq.{urllib.parse.quote(uname)}&id=neq.{urllib.parse.quote(str(finish_id))}&select=id"
+                        )
+                        if existing:
+                            st.error("That username is already being used.")
+                            st.stop()
+                    updated=_central_update_member(finish_id,{
+                        "username":uname,
+                        "password_hash":_member_password_hash(pw1),
+                        "status":"approved","active":True,
+                        "updated_at":datetime.now().isoformat(timespec="seconds")
+                    })
+                    person=updated[0] if updated else _central_member_by_id(finish_id)
+                    st.session_state.pop("_finish_member_setup",None)
+                    st.session_state["_chaplife_member_id"]=finish_id
+                    st.session_state["_chaplife_member_profile"]=person
+                    st.session_state["_cloud_loaded"]=False
+                    st.rerun()
+        st.stop()
+
+    # Load the correct private database.
     if not st.session_state.get("_cloud_loaded",False):
         try:
             found=cloud_pull_db()
             if not found:
-                # First login for this user: claim the current local ChapLife state as the initial cloud copy.
+                # Important: a new friend gets a brand-new empty DB, never the owner's DB.
+                path=current_db_path()
+                if member_id and path.exists():
+                    try: path.unlink()
+                    except Exception: pass
+                init_db()
                 cloud_push_db()
             st.session_state["_cloud_loaded"]=True
-        except Exception as e:
-            st.error("ChapLife could not load your private cloud data: "+str(e))
-            st.caption("Make sure the one-time Supabase SQL setup has been run and your Streamlit Secrets are correct.")
+        except Exception:
+            st.error("ChapLife could not load your private data.")
             if st.button("Sign out"):
                 cloud_logout(); st.rerun()
             st.stop()
@@ -1050,6 +1470,10 @@ def delete_reset_panel(table, label, display_col=None):
         confirm=st.checkbox(f'I understand this clears all {label}',key=f'confirm_{table}')
         if st.button(f'Reset all {label}',key=f'reset_{table}',disabled=not confirm):
             reset_table(table); st.rerun()
+
+# Ensure the owner profile exists before building owner-only navigation.
+if not st.session_state.get("_chaplife_member_id"):
+    ensure_multiuser_seed()
 
 # ---------- Navigation ----------
 if 'page' not in st.session_state: st.session_state.page='Home'
@@ -5707,8 +6131,6 @@ def friendly_app_error(section="this section"):
         st.rerun()
 
 # ---------- Render ----------
-# ChapLife multi-user initialization must run only after all database/cloud helpers exist.
-ensure_multiuser_seed()
 
 page=st.session_state.page
 if page=='User Management' and not _is_owner():
