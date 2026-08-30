@@ -11,7 +11,7 @@ DB_PATH = APP_DIR / 'chaplife.db'
 
 st.set_page_config(page_title='ChapLife', page_icon='✨', layout='wide', initial_sidebar_state='collapsed')
 
-BUILD_VERSION='ChapLife Cloud v6.9 · Paycheck Flow + Real Trainer'
+BUILD_VERSION='ChapLife Cloud v6.9.5 · Finance Paid Fix + Video Trainer'
 
 st.markdown('''
 <style>
@@ -687,7 +687,7 @@ def goto(p): st.session_state.page=p
 
 pages = {
  'Home':'🏠', 'Finances':'💰', 'Food & Nutrition':'🥗', 'Grocery Shopping':'🛒', 'My Trainer':'🏋🏾‍♀️',
- 'AI Reflection Coach':'🪞', 'Water & Jug Puzzles':'💧', 'Vocabulary':'📖', 'Health & Life':'❤️', 'Career Simulator':'🏗️',
+ 'Water & Jug Puzzles':'💧', 'Vocabulary':'📖', 'Health & Life':'❤️', 'Career Simulator':'🏗️',
  'My Progress':'📈', 'Settings':'⚙️'
 }
 
@@ -829,7 +829,7 @@ def home():
     insights=_dashboard_insights()
     grid=[
         ('💰','Finances'),('🥗','Food & Nutrition'),('🛒','Grocery Shopping'),
-        ('🏋🏾‍♀️','My Trainer'),('🪞','AI Reflection Coach'),('💧','Water & Jug Puzzles'),('📖','Vocabulary'),
+        ('🏋🏾‍♀️','My Trainer'),('💧','Water & Jug Puzzles'),('📖','Vocabulary'),
         ('🏗️','Career Simulator'),('❤️','Health & Life')
     ]
     if bool(get_setting('show_growth_section',False)):
@@ -1481,7 +1481,7 @@ def _render_provider_wallet(provider,keyprefix):
             c=st.columns(3)
             orig=c[0].number_input("Original balance",min_value=0.0,value=float(bp["original_amount"] or 0),step=5.0,key=f"{keyprefix}_orig_{bid}")
             remain=c[1].number_input("Current balance",min_value=0.0,value=float(bp["remaining_balance"] or 0),step=5.0,key=f"{keyprefix}_rem_{bid}")
-            aprv=c[2].number_input("APR %",min_value=0.0,max_value=100.0,value=float(bp["apr"] or 0),step=.01,key=f"{keyprefix}_apr_{bid}")
+            aprv=c[2].number_input("APR %",min_value=0.0,max_value=100.0,value=float(bp["apr"] or 0) if "apr" in bp.keys() else 0.0,step=.01,key=f"{keyprefix}_apr_{bid}")
             if st.button("💾 Save Changes",key=f"{keyprefix}_save_{bid}",use_container_width=True):
                 execute("UPDATE bnpl_purchases SET original_amount=?,remaining_balance=?,apr=? WHERE id=?",(orig,remain,aprv,bid)); st.rerun()
             sched=df_from("SELECT due_date,amount,status,paid_date FROM bnpl_installments WHERE purchase_id=? ORDER BY due_date",(bid,))
@@ -1495,8 +1495,30 @@ def _render_provider_wallet(provider,keyprefix):
                 st.success("Account deleted and Finance totals recalculated.")
                 st.rerun()
 
+
+def ensure_finance_schema():
+    """Bring older ChapLife finance databases forward before any Finance tab runs."""
+    migrations=[
+        ("bnpl_purchases","apr","REAL DEFAULT 0"),
+        ("paycheck_plan_items","paid_date","TEXT"),
+        ("savings_contributions","paycheck_id","INTEGER"),
+    ]
+    conn=db()
+    try:
+        for table,column,definition in migrations:
+            try:
+                cols=[r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()]
+                if column not in cols:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+            except Exception:
+                pass
+        conn.commit()
+    finally:
+        conn.close()
+
 def finances():
     st.title("💰 Finances")
+    ensure_finance_schema()
     preload_uploaded_budget_once()
     seed_recurring_due_dates_once()
     reassign_bnpl_installments()
@@ -1514,22 +1536,62 @@ def finances():
             s=_command_center(p)
             pid=p["id"]
             st.markdown("### ✅ What This Check Actually Paid")
-            paid_plan=df_from("""SELECT category,name,planned_amount,actual_amount,status,paid_date,note
-                                 FROM paycheck_plan_items WHERE paycheck_id=? AND status='Paid' ORDER BY id""",(pid,))
-            paid_bnpl=df_from("""SELECT p.provider AS category,p.merchant AS name,i.amount AS actual_amount,
-                                        i.amount AS planned_amount,i.status,i.paid_date,'' AS note
-                                 FROM bnpl_installments i JOIN bnpl_purchases p ON p.id=i.purchase_id
-                                 WHERE i.paycheck_id=? AND i.status='Paid' ORDER BY i.paid_date,p.provider""",(pid,))
-            pieces=[]
-            if not paid_plan.empty: pieces.append(paid_plan)
-            if not paid_bnpl.empty: pieces.append(paid_bnpl)
-            if pieces:
-                actual=pd.concat(pieces,ignore_index=True)
-                st.dataframe(display_df_us(actual),use_container_width=True,hide_index=True)
-                spent=float(pd.to_numeric(actual["actual_amount"],errors="coerce").fillna(0).sum())
+            # Build this history defensively so older ChapLife databases cannot crash Finance.
+            actual_records=[]
+            try:
+                plan_cols={r["name"] for r in rows("PRAGMA table_info(paycheck_plan_items)")}
+                select_paid_date="paid_date" if "paid_date" in plan_cols else "NULL AS paid_date"
+                paid_plan_rows=rows(f"""SELECT category,name,planned_amount,actual_amount,status,{select_paid_date},note
+                                      FROM paycheck_plan_items
+                                      WHERE paycheck_id=? AND status='Paid' ORDER BY id""",(pid,))
+                for x in paid_plan_rows:
+                    actual_records.append({
+                        "Category":x["category"] or "",
+                        "Paid":x["name"] or "",
+                        "Planned":float(x["planned_amount"] or 0),
+                        "Actual Paid":float(x["actual_amount"] or x["planned_amount"] or 0),
+                        "Paid Date":us_date(x["paid_date"]) if x["paid_date"] else "",
+                        "Note":x["note"] or ""
+                    })
+            except Exception:
+                pass
+
+            try:
+                inst_cols={r["name"] for r in rows("PRAGMA table_info(bnpl_installments)")}
+                bnpl_paid_date="i.paid_date" if "paid_date" in inst_cols else "NULL AS paid_date"
+                paid_bnpl_rows=rows(f"""SELECT p.provider,p.merchant,i.amount,{bnpl_paid_date}
+                                      FROM bnpl_installments i
+                                      JOIN bnpl_purchases p ON p.id=i.purchase_id
+                                      WHERE i.paycheck_id=? AND i.status='Paid'
+                                      ORDER BY i.id""",(pid,))
+                for x in paid_bnpl_rows:
+                    actual_records.append({
+                        "Category":x["provider"] or "BNPL",
+                        "Paid":x["merchant"] or "",
+                        "Planned":float(x["amount"] or 0),
+                        "Actual Paid":float(x["amount"] or 0),
+                        "Paid Date":us_date(x["paid_date"]) if x["paid_date"] else "",
+                        "Note":""
+                    })
+            except Exception:
+                pass
+
+            if actual_records:
+                actual_df=pd.DataFrame(actual_records)
+                st.dataframe(actual_df,use_container_width=True,hide_index=True)
+                spent=float(pd.to_numeric(actual_df["Actual Paid"],errors="coerce").fillna(0).sum())
             else:
-                spent=0.0; st.caption("Nothing has been marked paid from this check yet.")
-            saved=rows("""SELECT COALESCE(SUM(amount),0) AS x FROM savings_contributions WHERE paycheck_id=?""",(pid,))[0]["x"]
+                spent=0.0
+                st.caption("Nothing has been marked paid from this check yet.")
+
+            saved=0.0
+            try:
+                sc_cols={r["name"] for r in rows("PRAGMA table_info(savings_contributions)")}
+                if "paycheck_id" in sc_cols:
+                    sr=rows("SELECT COALESCE(SUM(amount),0) AS x FROM savings_contributions WHERE paycheck_id=?",(pid,))
+                    saved=float(sr[0]["x"] or 0) if sr else 0.0
+            except Exception:
+                saved=0.0
             income=float(p["actual"] or p["expected"] or 0)
             c=st.columns(4)
             c[0].metric("Check",money(income))
@@ -2512,6 +2574,24 @@ def reflection_coach():
             st.session_state.pop("coach_thread_id",None); st.rerun()
 
 # ---------- Smart Trainer ----------
+EXERCISE_VIDEO_URLS={
+    # Hand-picked exercise demonstrations. These play inside ChapLife.
+    "Glute Bridge":"https://www.youtube.com/watch?v=kJRVzQ6sukU",
+    "Goblet Squat":"https://www.youtube.com/watch?v=DfWhPPMRGGI",
+    "Bodyweight Squat":"https://www.youtube.com/watch?v=yzL1543i1-o",
+    "Step-Up":"https://www.youtube.com/watch?v=swjdcvH08ZM",
+    "Kettlebell Deadlift":"https://www.youtube.com/watch?v=BPGOyQKy9R0",
+}
+
+def exercise_video(name):
+    url=EXERCISE_VIDEO_URLS.get(name)
+    if url:
+        st.video(url)
+    else:
+        # Keep the workout useful even when a hand-picked video has not been assigned yet.
+        q=urllib.parse.quote_plus(f"{name} exercise proper form")
+        st.markdown(f"[▶️ Find a {html.escape(name)} demonstration on YouTube](https://www.youtube.com/results?search_query={q})")
+
 GYM_EQUIPMENT={
     "Planet Fitness":["Bodyweight","Dumbbells","Smith machine","Cable machine","Selectorized machines","Leg press","Treadmill","Elliptical","Bike","Bench"],
     "LA Fitness":["Bodyweight","Dumbbells","Barbell","Squat rack","Cable machine","Selectorized machines","Leg press","Treadmill","Elliptical","Bike","Bench"],
@@ -2545,60 +2625,6 @@ SMART_EXERCISES=[
     {"name":"Plank","focus":"Core","equipment":["Bodyweight"],"kind":"core","cue":"Brace like someone is about to tap your stomach."},
     {"name":"Kettlebell Deadlift","focus":"Full Body","equipment":["Kettlebell"],"kind":"hinge","cue":"Hinge at the hips and stand by squeezing glutes."},
 ]
-
-def exercise_animation(name,kind):
-    # Exercise-specific animated demonstration: body position + equipment move together.
-    # This is intentionally simple, but the movement shown corresponds to the exercise family.
-    safe=html.escape(name)
-    if kind=="curl":
-        moving="""<line x1='60' y1='48' x2='78' y2='62' stroke='currentColor' stroke-width='4'/>
-        <circle cx='82' cy='67' r='5' fill='none' stroke='currentColor' stroke-width='3'/>"""
-        transform="rotate(-55deg 60px 48px)"
-    elif kind=="hinge":
-        moving="""<line x1='60' y1='36' x2='72' y2='68' stroke='currentColor' stroke-width='5'/>
-        <line x1='72' y1='68' x2='72' y2='90' stroke='currentColor' stroke-width='3'/>
-        <rect x='65' y='88' width='14' height='10' rx='4' fill='none' stroke='currentColor' stroke-width='3'/>"""
-        transform="rotate(28deg 60px 68px)"
-    elif kind=="squat":
-        moving="""<line x1='60' y1='36' x2='60' y2='68' stroke='currentColor' stroke-width='5'/>
-        <line x1='60' y1='68' x2='43' y2='86' stroke='currentColor' stroke-width='5'/>
-        <line x1='43' y1='86' x2='36' y2='103' stroke='currentColor' stroke-width='5'/>
-        <line x1='60' y1='68' x2='77' y2='86' stroke='currentColor' stroke-width='5'/>
-        <line x1='77' y1='86' x2='84' y2='103' stroke='currentColor' stroke-width='5'/>"""
-        transform="translateY(15px)"
-    elif kind=="press":
-        moving="""<line x1='60' y1='47' x2='44' y2='36' stroke='currentColor' stroke-width='4'/>
-        <line x1='60' y1='47' x2='76' y2='36' stroke='currentColor' stroke-width='4'/>
-        <circle cx='40' cy='33' r='4' fill='none' stroke='currentColor' stroke-width='3'/>
-        <circle cx='80' cy='33' r='4' fill='none' stroke='currentColor' stroke-width='3'/>"""
-        transform="translateY(-15px)"
-    elif kind=="row":
-        moving="""<line x1='60' y1='48' x2='82' y2='55' stroke='currentColor' stroke-width='4'/>
-        <line x1='82' y1='55' x2='98' y2='55' stroke='currentColor' stroke-width='3'/>"""
-        transform="translateX(-18px)"
-    elif kind=="bridge":
-        moving="""<line x1='30' y1='75' x2='62' y2='75' stroke='currentColor' stroke-width='5'/>
-        <line x1='62' y1='75' x2='82' y2='92' stroke='currentColor' stroke-width='5'/>"""
-        transform="translateY(-12px)"
-    elif kind=="cardio":
-        moving="""<line x1='60' y1='68' x2='42' y2='95' stroke='currentColor' stroke-width='5'/>
-        <line x1='60' y1='68' x2='82' y2='86' stroke='currentColor' stroke-width='5'/>"""
-        transform="translateX(10px)"
-    else:
-        moving="""<line x1='60' y1='68' x2='45' y2='95' stroke='currentColor' stroke-width='5'/>
-        <line x1='60' y1='68' x2='78' y2='95' stroke='currentColor' stroke-width='5'/>"""
-        transform="translateY(-6px)"
-    return f"""<div style='border:1px solid #ddd;border-radius:14px;padding:8px;max-width:260px'>
-    <svg viewBox='0 0 120 120' width='100%' height='160'>
-      <line x1='15' y1='105' x2='105' y2='105' stroke='currentColor' stroke-width='3'/>
-      <circle cx='60' cy='25' r='10' fill='none' stroke='currentColor' stroke-width='4'/>
-      <line x1='60' y1='35' x2='60' y2='68' stroke='currentColor' stroke-width='5'/>
-      <line x1='60' y1='48' x2='44' y2='58' stroke='currentColor' stroke-width='4'/>
-      <g class='motion'>{moving}</g>
-    </svg>
-    <style>.motion{{transform-origin:center;animation:rep 1.2s ease-in-out infinite alternate}}
-    @keyframes rep{{from{{transform:none}}to{{transform:{transform}}}}}</style>
-    <div style='font-weight:700;text-align:center'>{safe}</div></div>"""
 
 def build_smart_workout(gym,available,goal,focus,mins,level,days=1):
     allowed=set(available)
@@ -2698,7 +2724,7 @@ def trainer():
                         dose="8–12 minutes" if cardio else ("2 sets × 8–10 reps" if plan["level"] in ("Beginner","Easy") else "3 sets × 8–12 reps")
                         st.markdown(f"**{j}. {e['name']}** — {dose}")
                         st.caption(e["cue"])
-                        components.html(exercise_animation(e["name"],e["kind"]),height=205)
+                        exercise_video(e["name"])
                     st.write("Cool-down: 3–5 minutes easy walking and comfortable mobility.")
 
     with tabs[1]:
@@ -2712,7 +2738,7 @@ def trainer():
             for j,e in enumerate(dayplan,1):
                 st.markdown(f"### {j}. {e['name']}")
                 st.caption(e["cue"])
-                components.html(exercise_animation(e["name"],e["kind"]),height=205)
+                exercise_video(e["name"])
             if st.button("✅ Complete & Save Today's Workout",use_container_width=True):
                 execute("INSERT INTO workouts(workout_date,name,minutes,intensity,focus,completed,note) VALUES(?,?,?,?,?,?,?)",
                         (date.today().isoformat(),f"{plan['gym']} · {plan['focus']}",int(plan["mins"]),plan["level"],plan["focus"],1,plan.get("limitations","")))
@@ -5244,7 +5270,6 @@ _renderers={
     'Food & Nutrition':food,
     'Grocery Shopping':grocery,
     'My Trainer':trainer,
-    'AI Reflection Coach':reflection_coach,
     'Water & Jug Puzzles':water_page,
     'Vocabulary':vocabulary,
     'Growth Lab':growth,
