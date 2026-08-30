@@ -21,7 +21,7 @@ def current_db_path():
 
 st.set_page_config(page_title='ChapLife', page_icon='✨', layout='wide', initial_sidebar_state='collapsed')
 
-BUILD_VERSION='ChapLife 7.1 · Shared Access + Approval'
+BUILD_VERSION='ChapLife 7.2 · Trips + Shared Planning'
 
 st.markdown('''
 <style>
@@ -212,6 +212,339 @@ def _provider_name(provider_key, fallback):
     r=rows("""SELECT display_name FROM finance_providers
               WHERE user_id=? AND provider_key=? AND active=1""",(u["id"],provider_key))
     return r[0]["display_name"] if r and r[0]["display_name"] else fallback
+
+
+def _trip_user_ref():
+    u=_current_user()
+    if not u: return ("","ChapLife User")
+    return (str(u.get("id") or u.get("username") or "owner"), _safe_display_name(u))
+
+def _trip_can_edit(trip):
+    ref,_=_trip_user_ref()
+    if _is_owner() and str(trip["owner_user_id"])==ref:
+        return True
+    if str(trip["owner_user_id"])==ref:
+        return True
+    member=rows("SELECT * FROM trip_members WHERE trip_id=? AND member_ref=?",(trip["id"],ref))
+    if not member: return False
+    mode=trip["planning_mode"] or "Owner only"
+    if mode=="Everyone can edit":
+        return True
+    return bool(member[0]["can_edit"])
+
+def _trip_can_suggest(trip):
+    ref,_=_trip_user_ref()
+    if str(trip["owner_user_id"])==ref:
+        return True
+    member=rows("SELECT * FROM trip_members WHERE trip_id=? AND member_ref=?",(trip["id"],ref))
+    if not member: return False
+    mode=trip["planning_mode"] or "Owner only"
+    if mode in ("Everyone can suggest","Everyone can edit"):
+        return True
+    return bool(member[0]["can_suggest"])
+
+def _trip_member_count(trip_id):
+    going=rows("SELECT COUNT(*) AS n FROM trip_members WHERE trip_id=? AND rsvp IN ('Going','Invited','Maybe')",(trip_id,))
+    return max(1,int(going[0]["n"] if going else 1))
+
+def _trip_personal_total(trip_id):
+    vals=rows("SELECT COALESCE(SUM(personal_amount),0) AS total FROM trip_budget_items WHERE trip_id=?",(trip_id,))
+    return float(vals[0]["total"] if vals else 0)
+
+def _trip_sync_savings_goal(trip_id):
+    trip=rows("SELECT * FROM trips WHERE id=?",(trip_id,))
+    if not trip: return
+    trip=trip[0]
+    target=_trip_personal_total(trip_id)
+    existing=rows("SELECT * FROM trip_savings_links WHERE trip_id=?",(trip_id,))
+    # Estimate remaining paychecks from biweekly cadence if dates exist; otherwise use 1.
+    checks=1
+    if trip["start_date"]:
+        try:
+            start=datetime.strptime(trip["start_date"],"%Y-%m-%d").date()
+            today=date.today()
+            days=max(0,(start-today).days)
+            checks=max(1,days//14)
+        except Exception:
+            checks=1
+    per=target/checks if checks else target
+    if existing:
+        execute("UPDATE trip_savings_links SET target_amount=?,per_paycheck=? WHERE trip_id=?",(target,per,trip_id))
+        gid=existing[0]["savings_goal_id"]
+        if gid:
+            try:
+                execute("UPDATE savings_goals SET target_amount=?, contribution_frequency=?, note=? WHERE id=?",
+                        (target,f"${per:,.2f} per paycheck",f"Linked to trip: {trip['name']}",gid))
+            except Exception:
+                pass
+    else:
+        gid=None
+        try:
+            execute("""INSERT INTO savings_goals(name,target_amount,current_amount,target_date,goal_type,priority,contribution_frequency,note)
+                       VALUES(?,?,?,?,?,?,?,?)""",
+                    (f"Trip: {trip['name']}",target,0,trip["start_date"],"Trip","High",f"${per:,.2f} per paycheck",
+                     f"Automatically linked to Trips"))
+            gid=rows("SELECT last_insert_rowid() AS id")[0]["id"]
+        except Exception:
+            gid=None
+        execute("""INSERT OR REPLACE INTO trip_savings_links(trip_id,savings_goal_id,target_amount,current_amount,per_paycheck,note)
+                   VALUES(?,?,?,?,?,?)""",
+                (trip_id,gid,target,0,per,f"Linked to {trip['name']}"))
+
+def trips_page():
+    st.title("✈️ Trips")
+    st.caption("Plan it yourself or with your people. Ideas stay separate from final costs, and finalized costs can become a savings goal in Finances.")
+
+    ref,name=_trip_user_ref()
+
+    with st.expander("＋ Let’s go on a trip",expanded=False):
+        with st.form("create_trip_form",clear_on_submit=True):
+            c1,c2=st.columns(2)
+            trip_name=c1.text_input("Trip name",placeholder="Miami Birthday Trip")
+            destination=c2.text_input("Destination",placeholder="Miami, FL")
+            departure=st.text_input("Leaving from",placeholder="New York, NY")
+            d1,d2=st.columns(2)
+            start=d1.date_input("Start date",format="MM/DD/YYYY",key="trip_start_new")
+            end=d2.date_input("End date",format="MM/DD/YYYY",key="trip_end_new")
+            mode=st.selectbox("Planning control",["Owner only","Everyone can suggest","Everyone can edit"])
+            notes=st.text_area("Trip notes",placeholder="Budget, vibe, must-do items, etc.")
+            if st.form_submit_button("Create Trip",use_container_width=True):
+                if not trip_name.strip():
+                    st.warning("Give the trip a name.")
+                else:
+                    now=datetime.now().isoformat(timespec="seconds")
+                    execute("""INSERT INTO trips(owner_user_id,name,destination,departure_city,start_date,end_date,planning_mode,status,notes,created_at,updated_at)
+                               VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                            (ref,trip_name.strip(),destination.strip(),departure.strip(),
+                             start.isoformat(),end.isoformat(),mode,"Ideas",notes,now,now))
+                    tid=rows("SELECT last_insert_rowid() AS id")[0]["id"]
+                    execute("""INSERT OR IGNORE INTO trip_members(trip_id,member_ref,member_name,rsvp,role,can_suggest,can_edit)
+                               VALUES(?,?,?,?,?,?,?)""",
+                            (tid,ref,name,"Going","Owner",1,1))
+                    st.success("Trip created.")
+                    st.rerun()
+
+    my_trips=rows("""SELECT DISTINCT t.* FROM trips t
+                     LEFT JOIN trip_members m ON m.trip_id=t.id
+                     WHERE t.owner_user_id=? OR m.member_ref=?
+                     ORDER BY COALESCE(t.start_date,'9999-12-31'),t.id DESC""",(ref,ref))
+    if not my_trips:
+        st.info("No trips yet. Create one above when you're ready.")
+        return
+
+    labels={t["id"]:f"{t['name']} · {us_date(t['start_date']) if t['start_date'] else 'No date'}" for t in my_trips}
+    selected_id=st.selectbox("Choose a trip",options=list(labels.keys()),format_func=lambda x:labels[x],key="trip_select")
+    trip=next(t for t in my_trips if t["id"]==selected_id)
+
+    with st.container(border=True):
+        st.markdown(f"## {trip['name']}")
+        meta=[]
+        if trip["destination"]: meta.append(trip["destination"])
+        if trip["start_date"]: meta.append(us_date(trip["start_date"]))
+        if trip["end_date"]: meta.append("to "+us_date(trip["end_date"]))
+        st.caption(" · ".join(meta) if meta else "Trip details not finalized")
+        c=st.columns(4)
+        c[0].metric("Stage",trip["status"] or "Ideas")
+        c[1].metric("Planning",trip["planning_mode"] or "Owner only")
+        c[2].metric("People",_trip_member_count(trip["id"]))
+        c[3].metric("Your Final Cost",f"${_trip_personal_total(trip['id']):,.2f}")
+
+    # Owner controls
+    if str(trip["owner_user_id"])==ref:
+        with st.expander("Trip owner controls"):
+            mode=st.selectbox("Planning control",["Owner only","Everyone can suggest","Everyone can edit"],
+                              index=["Owner only","Everyone can suggest","Everyone can edit"].index(trip["planning_mode"])
+                              if trip["planning_mode"] in ["Owner only","Everyone can suggest","Everyone can edit"] else 0,
+                              key=f"trip_mode_{trip['id']}")
+            stage=st.selectbox("Trip stage",["Ideas","Voting","Finalized","Saving","Ready ✈️"],
+                               index=["Ideas","Voting","Finalized","Saving","Ready ✈️"].index(trip["status"])
+                               if trip["status"] in ["Ideas","Voting","Finalized","Saving","Ready ✈️"] else 0,
+                               key=f"trip_stage_{trip['id']}")
+            if st.button("Save Trip Controls",key=f"save_trip_controls_{trip['id']}",use_container_width=True):
+                execute("UPDATE trips SET planning_mode=?,status=?,updated_at=? WHERE id=?",
+                        (mode,stage,datetime.now().isoformat(timespec="seconds"),trip["id"]))
+                st.rerun()
+
+            st.markdown("#### Invite / remove people")
+            if MULTIUSER_CONFIGURED:
+                try:
+                    members=_admin_http_json("/rest/v1/chaplife_members?status=eq.approved&active=eq.true&select=id,display_name,username&order=display_name.asc")
+                except Exception:
+                    members=[]
+            else:
+                members=[]
+            current=rows("SELECT * FROM trip_members WHERE trip_id=? ORDER BY role DESC,member_name",(trip["id"],))
+            current_refs={str(m["member_ref"]) for m in current}
+            choices={str(m["id"]):m.get("display_name") or m.get("username") or "ChapLife user" for m in members if str(m["id"])!=ref}
+            add_refs=st.multiselect("Invite ChapLife users",options=list(choices.keys()),format_func=lambda x:choices[x],
+                                    key=f"trip_invites_{trip['id']}")
+            if st.button("Send/Add Invites",key=f"trip_add_invites_{trip['id']}",use_container_width=True):
+                for rid in add_refs:
+                    execute("""INSERT OR IGNORE INTO trip_members(trip_id,member_ref,member_name,rsvp,role,can_suggest,can_edit)
+                               VALUES(?,?,?,?,?,?,?)""",
+                            (trip["id"],rid,choices[rid],"Invited","Member",
+                             1 if trip["planning_mode"]!="Owner only" else 0,
+                             1 if trip["planning_mode"]=="Everyone can edit" else 0))
+                st.rerun()
+
+            current=rows("SELECT * FROM trip_members WHERE trip_id=? ORDER BY role DESC,member_name",(trip["id"],))
+            for m in current:
+                if m["role"]=="Owner":
+                    st.write(f"👑 {m['member_name']} — Owner")
+                else:
+                    cc=st.columns([3,1,1])
+                    cc[0].write(f"{m['member_name']} — {m['rsvp']}")
+                    if cc[1].button("Remove",key=f"trip_remove_{m['id']}"):
+                        execute("DELETE FROM trip_members WHERE id=?",(m["id"],))
+                        st.rerun()
+                    canedit=bool(m["can_edit"])
+                    if cc[2].button("Edit ✓" if canedit else "Can edit",key=f"trip_editperm_{m['id']}"):
+                        execute("UPDATE trip_members SET can_edit=? WHERE id=?",(0 if canedit else 1,m["id"]))
+                        st.rerun()
+
+    # RSVP for non-owner
+    mine=rows("SELECT * FROM trip_members WHERE trip_id=? AND member_ref=?",(trip["id"],ref))
+    if mine and mine[0]["role"]!="Owner":
+        rsvp=st.radio("Your RSVP",["Going","Maybe","Can't Go"],horizontal=True,
+                      index=["Going","Maybe","Can't Go"].index(mine[0]["rsvp"]) if mine[0]["rsvp"] in ["Going","Maybe","Can't Go"] else 0,
+                      key=f"trip_rsvp_{trip['id']}")
+        if st.button("Save RSVP",key=f"trip_save_rsvp_{trip['id']}"):
+            execute("UPDATE trip_members SET rsvp=? WHERE id=?",(rsvp,mine[0]["id"]))
+            st.rerun()
+
+    tabs=st.tabs(["💡 Ideas","🗳️ Decisions","💰 Final Budget","🎯 Savings Plan"])
+
+    with tabs[0]:
+        can_suggest=_trip_can_suggest(trip)
+        if can_suggest:
+            with st.form(f"trip_option_add_{trip['id']}",clear_on_submit=True):
+                cat=st.selectbox("Category",["Stay","Flights","Activities","Restaurants","Transportation","Events","Other"])
+                title=st.text_input("Option name",placeholder="Hotel / flight / activity name")
+                url=st.text_input("Link",placeholder="Paste the website link")
+                location=st.text_input("Location (optional)")
+                c1,c2=st.columns(2)
+                low=c1.number_input("Estimated low cost",min_value=0.0,step=10.0)
+                high=c2.number_input("Estimated high cost",min_value=0.0,step=10.0)
+                basis=st.selectbox("Price is for",["Total","Per person","Per night","Per ticket","Other"])
+                notes=st.text_area("Why this option / notes")
+                if st.form_submit_button("Post Suggestion",use_container_width=True):
+                    if not title.strip():
+                        st.warning("Add a name for the option.")
+                    else:
+                        execute("""INSERT INTO trip_options(trip_id,category,title,url,location,price_low,price_high,price_basis,suggested_by,notes,status,created_at)
+                                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                                (trip["id"],cat,title.strip(),url.strip(),location.strip(),float(low),float(high),basis,name,notes,"Idea",
+                                 datetime.now().isoformat(timespec="seconds")))
+                        st.success("Suggestion posted.")
+                        st.rerun()
+        else:
+            st.caption("The trip owner currently has suggestions turned off for members.")
+
+        opts=rows("SELECT * FROM trip_options WHERE trip_id=? ORDER BY category,id DESC",(trip["id"],))
+        if not opts:
+            st.caption("No ideas posted yet.")
+        for o in opts:
+            votes=rows("SELECT COUNT(*) AS n FROM trip_votes WHERE option_id=? AND vote=1",(o["id"],))
+            vcount=int(votes[0]["n"] if votes else 0)
+            with st.container(border=True):
+                head=st.columns([4,1])
+                head[0].markdown(f"**{o['category']} · {o['title']}**")
+                head[1].markdown(f"**👍 {vcount}**")
+                if o["url"]:
+                    st.markdown(f"[Open link]({o['url']})")
+                if o["price_low"] or o["price_high"]:
+                    if o["price_low"] and o["price_high"]:
+                        st.write(f"Estimated range: **${o['price_low']:,.2f}–${o['price_high']:,.2f}** · {o['price_basis']}")
+                    else:
+                        val=o["price_high"] or o["price_low"]
+                        st.write(f"Estimated cost: **${val:,.2f}** · {o['price_basis']}")
+                if o["notes"]: st.caption(o["notes"])
+                st.caption(f"Suggested by {o['suggested_by'] or 'ChapLife user'}")
+
+                myvote=rows("SELECT * FROM trip_votes WHERE option_id=? AND voter_ref=?",(o["id"],ref))
+                cc=st.columns([1,2,1])
+                if cc[0].button("👍 Vote" if not myvote else "✓ Voted",key=f"vote_{o['id']}"):
+                    if myvote:
+                        execute("DELETE FROM trip_votes WHERE option_id=? AND voter_ref=?",(o["id"],ref))
+                    else:
+                        execute("""INSERT OR REPLACE INTO trip_votes(option_id,voter_ref,voter_name,vote,created_at)
+                                   VALUES(?,?,?,?,?)""",(o["id"],ref,name,1,datetime.now().isoformat(timespec="seconds")))
+                    st.rerun()
+                comment=cc[1].text_input("Comment",key=f"comment_{o['id']}",label_visibility="collapsed",
+                                         placeholder="Add a quick comment")
+                if cc[2].button("Post",key=f"postcomment_{o['id']}") and comment.strip():
+                    # reuse vote row even if vote=0
+                    execute("""INSERT INTO trip_votes(option_id,voter_ref,voter_name,vote,comment,created_at)
+                               VALUES(?,?,?,?,?,?)
+                               ON CONFLICT(option_id,voter_ref) DO UPDATE SET comment=excluded.comment""",
+                            (o["id"],ref,name,1 if myvote else 0,comment.strip(),datetime.now().isoformat(timespec="seconds")))
+                    st.rerun()
+                comments=rows("SELECT voter_name,comment FROM trip_votes WHERE option_id=? AND COALESCE(comment,'')!=''",(o["id"],))
+                for cm in comments:
+                    st.caption(f"💬 {cm['voter_name']}: {cm['comment']}")
+
+                if str(trip["owner_user_id"])==ref or _trip_can_edit(trip):
+                    if st.button("Finalize this option",key=f"finalize_{o['id']}",use_container_width=True):
+                        # Use midpoint of range as provisional final total; owner can edit later in Final Budget.
+                        amount=((float(o["price_low"] or 0)+float(o["price_high"] or 0))/2
+                                if o["price_low"] and o["price_high"] else float(o["price_high"] or o["price_low"] or 0))
+                        people=_trip_member_count(trip["id"])
+                        personal=amount/people if o["price_basis"]=="Total" and people else amount
+                        execute("UPDATE trip_options SET status='Finalized' WHERE id=?",(o["id"],))
+                        execute("""INSERT INTO trip_budget_items(trip_id,option_id,label,total_amount,split_mode,personal_amount,created_at)
+                                   VALUES(?,?,?,?,?,?,?)""",
+                                (trip["id"],o["id"],f"{o['category']}: {o['title']}",amount,"Equal",personal,
+                                 datetime.now().isoformat(timespec="seconds")))
+                        _trip_sync_savings_goal(trip["id"])
+                        st.rerun()
+
+    with tabs[1]:
+        opts=rows("""SELECT o.*,COALESCE(v.cnt,0) AS votes FROM trip_options o
+                     LEFT JOIN (SELECT option_id,COUNT(*) cnt FROM trip_votes WHERE vote=1 GROUP BY option_id) v ON v.option_id=o.id
+                     WHERE o.trip_id=? ORDER BY o.category,votes DESC,o.id DESC""",(trip["id"],))
+        if not opts:
+            st.caption("No options to compare yet.")
+        else:
+            data=[]
+            for o in opts:
+                rng=""
+                if o["price_low"] and o["price_high"]: rng=f"${o['price_low']:,.0f}–${o['price_high']:,.0f}"
+                elif o["price_low"] or o["price_high"]: rng=f"${(o['price_low'] or o['price_high']):,.0f}"
+                data.append({"Category":o["category"],"Option":o["title"],"Votes":o["votes"],"Estimated":rng,"Status":o["status"]})
+            st.dataframe(pd.DataFrame(data),hide_index=True,use_container_width=True)
+
+    with tabs[2]:
+        items=rows("SELECT * FROM trip_budget_items WHERE trip_id=? ORDER BY id",(trip["id"],))
+        if not items:
+            st.caption("Finalize an option and it will appear here.")
+        for item in items:
+            with st.container(border=True):
+                c=st.columns([3,1,1])
+                c[0].write(item["label"])
+                total=c[1].number_input("Final total",min_value=0.0,value=float(item["total_amount"] or 0),
+                                        step=10.0,key=f"trip_total_{item['id']}")
+                personal=c[2].number_input("Your share",min_value=0.0,value=float(item["personal_amount"] or 0),
+                                           step=10.0,key=f"trip_personal_{item['id']}")
+                if st.button("Update cost",key=f"trip_cost_update_{item['id']}"):
+                    execute("UPDATE trip_budget_items SET total_amount=?,personal_amount=? WHERE id=?",
+                            (float(total),float(personal),item["id"]))
+                    _trip_sync_savings_goal(trip["id"])
+                    st.rerun()
+        if items:
+            st.metric("Your finalized trip goal",f"${_trip_personal_total(trip['id']):,.2f}")
+
+    with tabs[3]:
+        _trip_sync_savings_goal(trip["id"])
+        link=rows("SELECT * FROM trip_savings_links WHERE trip_id=?",(trip["id"],))
+        if link:
+            link=link[0]
+            st.metric("Your trip savings goal",f"${float(link['target_amount'] or 0):,.2f}")
+            st.metric("Suggested per paycheck",f"${float(link['per_paycheck'] or 0):,.2f}")
+            if trip["start_date"]:
+                st.caption(f"Target date: {us_date(trip['start_date'])}")
+            st.success("This trip is linked to your Finance savings goals.")
+        else:
+            st.caption("Finalize trip costs to create a savings plan.")
 
 def user_access_center():
     st.title("👤 Profile")
@@ -647,7 +980,80 @@ def init_db():
         active INTEGER DEFAULT 1,
         UNIQUE(user_id,provider_key)
     );
-    CREATE TABLE IF NOT EXISTS feature_requests (
+    
+    CREATE TABLE IF NOT EXISTS trips (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        cloud_trip_id TEXT,
+        owner_user_id TEXT,
+        name TEXT NOT NULL,
+        destination TEXT,
+        departure_city TEXT,
+        start_date TEXT,
+        end_date TEXT,
+        planning_mode TEXT DEFAULT 'Owner only',
+        status TEXT DEFAULT 'Ideas',
+        notes TEXT,
+        created_at TEXT,
+        updated_at TEXT
+    );
+    CREATE TABLE IF NOT EXISTS trip_members (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        trip_id INTEGER,
+        member_ref TEXT,
+        member_name TEXT,
+        rsvp TEXT DEFAULT 'Invited',
+        role TEXT DEFAULT 'Member',
+        can_suggest INTEGER DEFAULT 1,
+        can_edit INTEGER DEFAULT 0,
+        UNIQUE(trip_id,member_ref)
+    );
+    CREATE TABLE IF NOT EXISTS trip_options (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        trip_id INTEGER,
+        category TEXT,
+        title TEXT,
+        url TEXT,
+        location TEXT,
+        price_low REAL DEFAULT 0,
+        price_high REAL DEFAULT 0,
+        price_basis TEXT DEFAULT 'Total',
+        suggested_by TEXT,
+        notes TEXT,
+        status TEXT DEFAULT 'Idea',
+        created_at TEXT
+    );
+    CREATE TABLE IF NOT EXISTS trip_votes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        option_id INTEGER,
+        voter_ref TEXT,
+        voter_name TEXT,
+        vote INTEGER DEFAULT 1,
+        comment TEXT,
+        created_at TEXT,
+        UNIQUE(option_id,voter_ref)
+    );
+    CREATE TABLE IF NOT EXISTS trip_budget_items (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        trip_id INTEGER,
+        option_id INTEGER,
+        label TEXT,
+        total_amount REAL DEFAULT 0,
+        split_mode TEXT DEFAULT 'Equal',
+        personal_amount REAL DEFAULT 0,
+        due_date TEXT,
+        paid_amount REAL DEFAULT 0,
+        created_at TEXT
+    );
+    CREATE TABLE IF NOT EXISTS trip_savings_links (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        trip_id INTEGER UNIQUE,
+        savings_goal_id INTEGER,
+        target_amount REAL DEFAULT 0,
+        current_amount REAL DEFAULT 0,
+        per_paycheck REAL DEFAULT 0,
+        note TEXT
+    );
+CREATE TABLE IF NOT EXISTS feature_requests (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER,
         created_at TEXT,
@@ -1480,7 +1886,7 @@ if 'page' not in st.session_state: st.session_state.page='Home'
 def goto(p): st.session_state.page=p
 
 pages = {
- 'Home':'🏠', 'Finances':'💰', 'Food & Nutrition':'🥗', 'Grocery Shopping':'🛒', 'My Trainer':'🏋🏾‍♀️',
+ 'Home':'🏠', 'Finances':'💰', 'Trips':'✈️', 'Food & Nutrition':'🥗', 'Grocery Shopping':'🛒', 'My Trainer':'🏋🏾‍♀️',
  'Water & Jug Puzzles':'💧', 'Vocabulary':'📖', 'Health & Life':'❤️', 'Career Simulator':'🏗️',
  'My Progress':'📈', 'Settings':'⚙️', 'Profile':'👤'
 }
@@ -2525,6 +2931,22 @@ def finances():
             print('ChapLife Finance tab 3 error:', repr(_finance_tab_error))
             st.warning('This section needs a compatibility update. The rest of Finance is still available from the menu above.')
     if section=="🏦 Savings":
+        try:
+            triplinks=rows("""SELECT tsl.*,t.name,t.start_date FROM trip_savings_links tsl
+                              JOIN trips t ON t.id=tsl.trip_id
+                              ORDER BY COALESCE(t.start_date,'9999-12-31')""")
+            if triplinks:
+                st.subheader("✈️ Trip-linked savings")
+                for tl in triplinks:
+                    with st.container(border=True):
+                        st.write(f"**{tl['name']}**")
+                        c=st.columns(2)
+                        c[0].metric("Goal",f"${float(tl['target_amount'] or 0):,.2f}")
+                        c[1].metric("Per paycheck",f"${float(tl['per_paycheck'] or 0):,.2f}")
+                st.divider()
+        except Exception:
+            pass
+
         try:
             st.subheader("🏦 Savings")
             st.write("Build your actual savings account and separate sinking funds for trips, birthdays, big purchases, or anything else.")
@@ -6143,6 +6565,7 @@ if page=='Conversation & Current Events' and not bool(get_setting('show_conversa
 _renderers={
     'Home':home,
     'Finances':finances,
+    'Trips':trips_page,
     'Food & Nutrition':food,
     'Grocery Shopping':grocery,
     'My Trainer':trainer,
