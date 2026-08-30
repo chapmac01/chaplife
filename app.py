@@ -11,7 +11,7 @@ DB_PATH = APP_DIR / 'chaplife.db'
 
 st.set_page_config(page_title='ChapLife', page_icon='✨', layout='wide', initial_sidebar_state='collapsed')
 
-BUILD_VERSION='ChapLife Cloud v6.8 · AI Coach + Smart Trainer'
+BUILD_VERSION='ChapLife Cloud v6.9 · Paycheck Flow + Real Trainer'
 
 st.markdown('''
 <style>
@@ -129,6 +129,19 @@ def init_db():
         seed_key TEXT PRIMARY KEY,
         applied_at TEXT,
         note TEXT
+    );
+    CREATE TABLE IF NOT EXISTS coach_threads (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        title TEXT,
+        created_at TEXT,
+        updated_at TEXT
+    );
+    CREATE TABLE IF NOT EXISTS coach_messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        thread_id INTEGER,
+        role TEXT,
+        content TEXT,
+        created_at TEXT
     );
     CREATE TABLE IF NOT EXISTS weight_log (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1397,511 +1410,341 @@ def seed_recurring_due_dates_once():
     execute("INSERT OR REPLACE INTO chaplife_seed_state(seed_key,applied_at,note) VALUES(?,?,?)",
             (key,datetime.now().isoformat(),"Recurring bill due days seeded from Sept 4 column A."))
 
+def _paycheck_selector(key,label="Paycheck"):
+    pays=rows("SELECT * FROM paychecks ORDER BY pay_date DESC")
+    if not pays:
+        return None,None
+    labels={_safe_paycheck_label(p):p for p in pays}
+    selected=st.selectbox(label,list(labels.keys()),key=key)
+    return labels[selected],pays
+
+def _command_center(p):
+    pid=p["id"]; s=paycheck_connected_summary(pid)
+    c=st.columns(4)
+    c[0].metric("Paycheck",money(s["income"]))
+    c[1].metric("Affirm + Klarna due",money(s["bnpl_due"]))
+    c[2].metric("Other planned",money(s["planned"]))
+    c[3].metric("Left after plan",money(s["remaining"]))
+    if s["remaining"]<0: st.error(f"This paycheck is over-planned by {money(abs(s['remaining']))}.")
+    elif s["income"] and s["remaining"]/s["income"]<.1: st.warning("This paycheck has less than 10% unassigned after the current plan.")
+    else: st.success("This paycheck is currently within the plan.")
+    return s
+
+def _render_provider_wallet(provider,keyprefix):
+    p,_=_paycheck_selector(f"{keyprefix}_impact",f"Show {provider} impact for paycheck")
+    pid=p["id"] if p else None
+    bal,blim,plim,upcoming=bnpl_provider_summary(provider,pid)
+    c=st.columns(4)
+    c[0].metric("Active balance",money(bal))
+    c[1].metric("Due from selected check",money(upcoming))
+    c[2].metric("My balance limit",money(blim) if blim else "Not set")
+    c[3].metric("Available under my limit",money(max(0,blim-bal)) if blim else "—")
+    st.write(_bnpl_risk(bal,blim))
+
+    current=rows("SELECT * FROM finance_limits WHERE provider=?",(provider,))
+    bl=float(current[0]["balance_limit"] or 0) if current else 0
+    pl=float(current[0]["paycheck_limit"] or 0) if current else 0
+    with st.expander("⚙️ My spending limits"):
+        c=st.columns(3)
+        nbl=c[0].number_input("Max total balance",min_value=0.0,value=bl,step=25.0,key=f"{keyprefix}_blim")
+        npl=c[1].number_input("Max from one paycheck",min_value=0.0,value=pl,step=10.0,key=f"{keyprefix}_plim")
+        if c[2].button("Save limits",key=f"{keyprefix}_save_limits"):
+            execute("""INSERT INTO finance_limits(provider,balance_limit,paycheck_limit) VALUES(?,?,?)
+                       ON CONFLICT(provider) DO UPDATE SET balance_limit=excluded.balance_limit,paycheck_limit=excluded.paycheck_limit""",
+                    (provider,nbl,npl)); st.rerun()
+
+    st.markdown(f"### ➕ Add {provider} purchase")
+    with st.form(f"{keyprefix}_add",clear_on_submit=True):
+        c=st.columns(3)
+        merchant=c[0].text_input("Store / purchase")
+        total=c[1].number_input("Original total",min_value=0.0,step=5.0)
+        apr=c[2].number_input("APR % (if available)",min_value=0.0,max_value=100.0,step=.01)
+        c=st.columns(4)
+        pdte=c[0].date_input("Purchase date",date.today(),format="MM/DD/YYYY")
+        freq=c[1].selectbox("Payments",["Every 2 weeks","Monthly","Weekly"])
+        count=c[2].number_input("# payments",1,36,4)
+        first=c[3].date_input("First payment",date.today(),format="MM/DD/YYYY")
+        famt=st.number_input("First payment amount (0 = split evenly)",min_value=0.0,step=5.0)
+        if st.form_submit_button(f"Add {provider} purchase",use_container_width=True):
+            create_bnpl_purchase(provider,merchant,pdte,total,freq,count,first,famt,"")
+            newest=rows("SELECT id FROM bnpl_purchases WHERE provider=? ORDER BY id DESC LIMIT 1",(provider,))
+            if newest: execute("UPDATE bnpl_purchases SET apr=? WHERE id=?",(float(apr),newest[0]["id"]))
+            st.rerun()
+
+    active=rows("SELECT * FROM bnpl_purchases WHERE provider=? AND status='Active' ORDER BY merchant",(provider,))
+    st.markdown(f"### {provider} accounts")
+    if not active:
+        st.caption(f"No active {provider} accounts.")
+    for bp in active:
+        bid=bp["id"]
+        with st.expander(f"{bp['merchant']} · {money(bp['remaining_balance'])} remaining"):
+            c=st.columns(3)
+            orig=c[0].number_input("Original balance",min_value=0.0,value=float(bp["original_amount"] or 0),step=5.0,key=f"{keyprefix}_orig_{bid}")
+            remain=c[1].number_input("Current balance",min_value=0.0,value=float(bp["remaining_balance"] or 0),step=5.0,key=f"{keyprefix}_rem_{bid}")
+            aprv=c[2].number_input("APR %",min_value=0.0,max_value=100.0,value=float(bp["apr"] or 0),step=.01,key=f"{keyprefix}_apr_{bid}")
+            if st.button("💾 Save Changes",key=f"{keyprefix}_save_{bid}",use_container_width=True):
+                execute("UPDATE bnpl_purchases SET original_amount=?,remaining_balance=?,apr=? WHERE id=?",(orig,remain,aprv,bid)); st.rerun()
+            sched=df_from("SELECT due_date,amount,status,paid_date FROM bnpl_installments WHERE purchase_id=? ORDER BY due_date",(bid,))
+            if not sched.empty: st.dataframe(display_df_us(sched),use_container_width=True,hide_index=True)
+
+            st.markdown("**Delete account**")
+            confirm=st.checkbox(f"I want to permanently delete {provider} · {bp['merchant']} and its payment schedule.",key=f"{keyprefix}_delconfirm_{bid}")
+            if st.button("🗑️ Delete Account",key=f"{keyprefix}_delete_{bid}",disabled=not confirm,use_container_width=True):
+                execute("DELETE FROM bnpl_installments WHERE purchase_id=?",(bid,))
+                execute("DELETE FROM bnpl_purchases WHERE id=?",(bid,))
+                st.success("Account deleted and Finance totals recalculated.")
+                st.rerun()
+
 def finances():
     st.title("💰 Finances")
     preload_uploaded_budget_once()
     seed_recurring_due_dates_once()
     reassign_bnpl_installments()
-    st.caption("✓ Your old Budget sheet is preloaded into ChapLife · Dates display MM/DD/YYYY · Times display with AM/PM")
-    tabs=st.tabs([
-        "💵 Paycheck Command","🛍️ Affirm & Klarna","💳 Cards & Debt","🏠 Shared / Randi",
-        "📋 Bills & Spending","🎯 Savings","📥 Import","⚙️ Money Settings"
-    ])
 
-    # ---- PAYCHECK COMMAND CENTER ----
+    tabs=st.tabs(["💵 Paycheck","📝 Plan","🅰️ Affirm","🛍️ Klarna","🏦 Savings",
+                  "💳 Cards & Debt","📅 Bills & Spending","🤝 Randi","📊 Reports","⚙️ Money Settings"])
+
+    # 1 PAYCHECK — actual history first
     with tabs[0]:
         st.subheader("💵 Paycheck Command Center")
-        pays=rows("SELECT * FROM paychecks ORDER BY pay_date DESC")
-        if not pays:
-            st.info("No paycheck is saved yet. Add your next paycheck below to start the connected plan.")
-            st.markdown("### ➕ Add Paycheck")
-            with st.form("first_paycheck_form",clear_on_submit=True):
-                c=st.columns(2)
-                pdte=c[0].date_input("Pay date",value=date.today(),format="MM/DD/YYYY",key="first_pay_date")
-                exp=c[1].number_input("Expected take-home",min_value=0.0,value=0.0,step=25.0,key="first_pay_expected")
-                c=st.columns(2)
-                act=c[0].number_input("Actual take-home",min_value=0.0,value=0.0,step=25.0,key="first_pay_actual",
-                                      help="Leave at $0 until the paycheck actually arrives.")
-                note=c[1].text_input("Note",placeholder="Sept. 4 paycheck",key="first_pay_note")
-                if st.form_submit_button("💾 Save Paycheck",use_container_width=True):
-                    newpid=execute("INSERT INTO paychecks(pay_date,expected,actual,note) VALUES(?,?,?,?)",
-                                   (pdte.isoformat(),float(exp),float(act),note))
-                    if act>0:
-                        execute("""INSERT INTO finance_transactions(tx_date,amount,tx_type,category,subcategory,need_want,merchant,note)
-                                   VALUES(?,?,?,?,?,?,?,?)""",
-                                (pdte.isoformat(),float(act),"Income","Paycheck","Regular","Income","Paycheck",note))
-                    reassign_bnpl_installments()
-                    st.success("Paycheck saved. ChapLife is connecting its obligations now.")
-                    st.rerun()
-            st.caption("Expected = what you plan to receive. Actual = what really hit your account. Future paychecks stay planning until they arrive.")
+        p,pays=_paycheck_selector("paycheck_home","Paycheck")
+        if not p:
+            st.info("Add a paycheck in Plan to get started.")
         else:
-            labels={_safe_paycheck_label(p):p for p in pays}
-            selected_label=st.selectbox("Paycheck to plan",list(labels.keys()),key="finance_command_paycheck")
-            p=labels[selected_label]
+            s=_command_center(p)
             pid=p["id"]
-            s=paycheck_connected_summary(pid)
+            st.markdown("### ✅ What This Check Actually Paid")
+            paid_plan=df_from("""SELECT category,name,planned_amount,actual_amount,status,paid_date,note
+                                 FROM paycheck_plan_items WHERE paycheck_id=? AND status='Paid' ORDER BY id""",(pid,))
+            paid_bnpl=df_from("""SELECT p.provider AS category,p.merchant AS name,i.amount AS actual_amount,
+                                        i.amount AS planned_amount,i.status,i.paid_date,'' AS note
+                                 FROM bnpl_installments i JOIN bnpl_purchases p ON p.id=i.purchase_id
+                                 WHERE i.paycheck_id=? AND i.status='Paid' ORDER BY i.paid_date,p.provider""",(pid,))
+            pieces=[]
+            if not paid_plan.empty: pieces.append(paid_plan)
+            if not paid_bnpl.empty: pieces.append(paid_bnpl)
+            if pieces:
+                actual=pd.concat(pieces,ignore_index=True)
+                st.dataframe(display_df_us(actual),use_container_width=True,hide_index=True)
+                spent=float(pd.to_numeric(actual["actual_amount"],errors="coerce").fillna(0).sum())
+            else:
+                spent=0.0; st.caption("Nothing has been marked paid from this check yet.")
+            saved=rows("""SELECT COALESCE(SUM(amount),0) AS x FROM savings_contributions WHERE paycheck_id=?""",(pid,))[0]["x"]
+            income=float(p["actual"] or p["expected"] or 0)
             c=st.columns(4)
-            c[0].metric("Paycheck",money(s["income"]))
-            c[1].metric("Affirm + Klarna due",money(s["bnpl_due"]))
-            c[2].metric("Other planned",money(s["planned"]))
-            c[3].metric("Left after plan",money(s["remaining"]))
+            c[0].metric("Check",money(income))
+            c[1].metric("Actually paid",money(spent))
+            c[2].metric("Actually saved",money(saved))
+            c[3].metric("Remaining / unassigned",money(income-spent-float(saved or 0)))
 
-            if s["remaining"]<0:
-                st.error(f"This paycheck is over-planned by {money(abs(s['remaining']))}.")
-            elif s["income"] and s["remaining"]/s["income"]<.1:
-                st.warning("This paycheck has less than 10% unassigned after the current plan.")
-            else:
-                st.success("This paycheck is currently within the plan.")
-
-            held,owed,physical=roommate_summary()
-            st.caption(f"Protected roommate/Randi ledger currently shows {money(held)} held. ChapLife does not count that as ordinary spending money.")
-
-            st.markdown("### 🛍️ BNPL coming from this paycheck")
-            inst=df_from("""SELECT i.id,i.due_date,p.provider,p.merchant,i.amount,i.status,p.remaining_balance
-                            FROM bnpl_installments i JOIN bnpl_purchases p ON p.id=i.purchase_id
-                            WHERE i.paycheck_id=? ORDER BY i.due_date,p.provider,p.merchant""",(pid,))
-            if inst.empty:
-                st.caption("No Affirm/Klarna installments assigned to this paycheck.")
-            else:
-                st.dataframe(display_df_us(inst[["due_date","provider","merchant","amount","status","remaining_balance"]]),
-                             use_container_width=True,hide_index=True)
-                unpaid=[r for r in rows("""SELECT i.id,i.due_date,p.provider,p.merchant,i.amount
-                                          FROM bnpl_installments i JOIN bnpl_purchases p ON p.id=i.purchase_id
-                                          WHERE i.paycheck_id=? AND i.status!='Paid' ORDER BY i.due_date""",(pid,))]
-                if unpaid:
-                    opts={f"{x['provider']} · {x['merchant']} · {us_date(x['due_date'])} · {money(x['amount'])}":x for x in unpaid}
-                    choice=st.selectbox("Select a planned BNPL installment",["Select..."]+list(opts.keys()),key="mark_bnpl_paid")
+    # 2 PLAN — can plan any paycheck, but page name is simply Plan
+    with tabs[1]:
+        st.subheader("📝 Plan")
+        st.caption("Choose a paycheck when you want to plan one. You do not have to plan every check.")
+        p,pays=_paycheck_selector("plan_paycheck","Paycheck to work with")
+        if p:
+            _command_center(p); pid=p["id"]
+            st.markdown("### Planned BNPL")
+            inst=rows("""SELECT i.id,i.due_date,p.provider,p.merchant,i.amount,i.status
+                         FROM bnpl_installments i JOIN bnpl_purchases p ON p.id=i.purchase_id
+                         WHERE i.paycheck_id=? ORDER BY i.due_date""",(pid,))
+            if inst:
+                st.dataframe(display_df_us(pd.DataFrame(inst)),use_container_width=True,hide_index=True)
+                opts={f"{x['provider']} · {x['merchant']} · {us_date(x['due_date'])} · {money(x['amount'])}":x for x in inst if x["status"]!="Paid"}
+                if opts:
+                    sel=st.selectbox("BNPL action",["Select..."]+list(opts.keys()),key="plan_bnpl_action")
                     c=st.columns(2)
-                    if choice!="Select..." and c[0].button("✓ Mark Paid",use_container_width=True,key="mark_bnpl_paid_btn"):
-                        mark_bnpl_installment_paid(opts[choice]["id"])
-                        st.rerun()
-                    if choice!="Select..." and c[1].button("🗑️ Remove From This Plan",use_container_width=True,key="remove_bnpl_plan_btn"):
-                        execute("UPDATE bnpl_installments SET paycheck_id=NULL,status='Removed from plan' WHERE id=?",(opts[choice]["id"],))
-                        st.success("That BNPL installment was removed from this paycheck plan. The purchase itself was not deleted.")
-                        st.rerun()
+                    if sel!="Select..." and c[0].button("✓ Mark Paid",use_container_width=True):
+                        mark_bnpl_installment_paid(opts[sel]["id"],date.today()); st.rerun()
+                    if sel!="Select..." and c[1].button("Remove From Plan",use_container_width=True):
+                        execute("UPDATE bnpl_installments SET paycheck_id=NULL,status='Removed from plan' WHERE id=?",(opts[sel]["id"],)); st.rerun()
 
-            st.markdown("### 📋 Everything else planned from this paycheck")
-            with st.form("add_paycheck_plan_item",clear_on_submit=True):
+            st.markdown("### Everything Else")
+            with st.form("plan_add_item",clear_on_submit=True):
                 c=st.columns(4)
-                category=c[0].selectbox("Category",["IRS","Dues","Randi / Protected","Credit Card","Rent","Utilities","Groceries","Transportation","Savings","Subscription","Other"])
-                name=c[1].text_input("What is it?",placeholder="IRS payment, Chase card, Local dues...")
-                amount=c[2].number_input("Planned amount",min_value=0.0,step=5.0)
-                status=c[3].selectbox("Status",["Planned","Paid"])
-                note=st.text_input("Note",placeholder="Optional details")
-                if st.form_submit_button("Add to this paycheck",use_container_width=True):
-                    protected=1 if category=="Randi / Protected" else 0
-                    actual=amount if status=="Paid" else 0
+                cat=c[0].selectbox("Category",["IRS","Dues","Randi / Protected","Credit Card","Rent","Utilities","Groceries","Transportation","Savings","Subscription","Travel","Other"])
+                name=c[1].text_input("What is it?")
+                amt=c[2].number_input("Planned amount",min_value=0.0,step=5.0)
+                note=c[3].text_input("Note")
+                if st.form_submit_button("Add to Plan",use_container_width=True):
                     execute("""INSERT INTO paycheck_plan_items(paycheck_id,category,name,planned_amount,actual_amount,status,protected,note)
-                               VALUES(?,?,?,?,?,?,?,?)""",(pid,category,name,amount,actual,status,protected,note))
-                    if status=="Paid" and category!="Randi / Protected":
-                        execute("""INSERT INTO finance_transactions(tx_date,amount,tx_type,category,subcategory,need_want,merchant,note)
-                                   VALUES(?,?,?,?,?,?,?,?)""",(p["pay_date"],amount,"Expense",category,"Paycheck Plan","Need",name,note))
-                    st.rerun()
+                               VALUES(?,?,?,?,?,'Planned',?,?)""",(pid,cat,name,amt,0.0,1 if cat=="Randi / Protected" else 0,note)); st.rerun()
 
-            items=df_from("SELECT * FROM paycheck_plan_items WHERE paycheck_id=? ORDER BY id DESC",(pid,))
-            if not items.empty:
-                st.dataframe(display_df_us(items[["category","name","planned_amount","actual_amount","status","note"]]),use_container_width=True,hide_index=True)
-                delmap={f"{r['category']} · {r['name']} · {money(r['planned_amount'])}":r for r in rows("SELECT * FROM paycheck_plan_items WHERE paycheck_id=?",(pid,))}
-                dsel=st.selectbox("Remove a planned item",["Select..."]+list(delmap.keys()),key="delete_plan_item")
-                if dsel!="Select..." and st.button("Remove selected item",key="delete_plan_item_btn"):
-                    execute("DELETE FROM paycheck_plan_items WHERE id=?",(delmap[dsel]["id"],)); st.rerun()
+            planned=rows("SELECT * FROM paycheck_plan_items WHERE paycheck_id=? ORDER BY id DESC",(pid,))
+            for x in planned:
+                with st.container(border=True):
+                    c=st.columns([2,1,1,1])
+                    c[0].markdown(f"**{x['name']}**  \n{x['category']} · planned {money(x['planned_amount'])}")
+                    actual=c[1].number_input("Actual paid",min_value=0.0,value=float(x["actual_amount"] or x["planned_amount"] or 0),step=1.0,key=f"actual_plan_{x['id']}")
+                    paid_date=c[2].date_input("Paid date",date.today(),format="MM/DD/YYYY",key=f"paid_date_{x['id']}")
+                    if x["status"]=="Paid":
+                        c[3].success("Paid")
+                    elif c[3].button("✓ Paid",key=f"mark_plan_paid_{x['id']}",use_container_width=True):
+                        execute("UPDATE paycheck_plan_items SET status='Paid',actual_amount=?,paid_date=? WHERE id=?",(actual,paid_date.isoformat(),x["id"]))
+                        if x["category"]=="Savings":
+                            # Savings without a selected goal still remains a paid/saved paycheck item.
+                            pass
+                        elif x["category"]!="Randi / Protected":
+                            execute("""INSERT INTO finance_transactions(tx_date,amount,tx_type,category,subcategory,need_want,merchant,note)
+                                       VALUES(?,?,?,?,?,?,?,?)""",(paid_date.isoformat(),actual,"Expense",x["category"],"Paycheck Plan","Need",x["name"],x["note"] or ""))
+                        st.rerun()
+                    if st.button("Remove",key=f"remove_plan_{x['id']}"):
+                        execute("DELETE FROM paycheck_plan_items WHERE id=?",(x["id"],)); st.rerun()
 
-            st.markdown("### ➕ Add Another Paycheck")
-            with st.form("quick_add_paycheck",clear_on_submit=True):
+        st.divider()
+        with st.expander("➕ Add / update paycheck"):
+            with st.form("plan_add_paycheck",clear_on_submit=True):
                 c=st.columns(4)
-                pdte=c[0].date_input("Pay date",value=date.today(),format="MM/DD/YYYY",key="quick_pay_date")
-                exp=c[1].number_input("Expected take-home",min_value=0.0,value=0.0,step=25.0,key="quick_pay_expected")
-                act=c[2].number_input("Actual take-home",min_value=0.0,value=0.0,step=25.0,key="quick_pay_actual",help="Leave at $0 until the paycheck actually arrives.")
-                note=c[3].text_input("Note",key="quick_pay_note")
-                if st.form_submit_button("Save paycheck"):
-                    newpid=execute("INSERT INTO paychecks(pay_date,expected,actual,note) VALUES(?,?,?,?)",(pdte.isoformat(),exp,act,note))
-                    if act>0:
-                        execute("""INSERT INTO finance_transactions(tx_date,amount,tx_type,category,subcategory,need_want,merchant,note)
-                                   VALUES(?,?,?,?,?,?,?,?)""",(pdte.isoformat(),act,"Income","Paycheck","Regular","Income","Paycheck",note))
+                d=c[0].date_input("Pay date",date.today(),format="MM/DD/YYYY")
+                expected=c[1].number_input("Expected take-home",min_value=0.0,step=25.0)
+                actual=c[2].number_input("Actual take-home",min_value=0.0,step=25.0)
+                note=c[3].text_input("Note")
+                if st.form_submit_button("Save Paycheck"):
+                    existing=rows("SELECT id FROM paychecks WHERE pay_date=?",(d.isoformat(),))
+                    if existing: execute("UPDATE paychecks SET expected=?,actual=?,note=? WHERE id=?",(expected,actual,note,existing[0]["id"]))
+                    else: execute("INSERT INTO paychecks(pay_date,expected,actual,note) VALUES(?,?,?,?)",(d.isoformat(),expected,actual,note))
                     reassign_bnpl_installments(); st.rerun()
 
-    # ---- BNPL WALLET ----
-    with tabs[1]:
-        st.subheader("🛍️ Affirm & Klarna Wallet")
-        st.write("New purchases, balances, installment dates, personal limits, and paycheck planning all feed the same Finance system.")
-
-        pays=rows("SELECT * FROM paychecks ORDER BY pay_date DESC")
-        default_pid=pays[0]["id"] if pays else None
-        if pays:
-            current_label=st.selectbox("Show payday impact for",[_safe_paycheck_label(p) for p in pays],key="bnpl_payday_impact")
-            current_pid=next(p["id"] for p in pays if _safe_paycheck_label(p)==current_label)
-        else:
-            current_pid=None
-
-        cols=st.columns(2)
-        for n,provider in enumerate(["Affirm","Klarna"]):
-            bal,blim,plim,upcoming=bnpl_provider_summary(provider,current_pid)
-            with cols[n]:
-                with st.container(border=True):
-                    st.markdown(f"### {provider}")
-                    st.metric("Active balance",money(bal))
-                    st.metric("Available under MY limit",money(max(0,blim-bal)) if blim else "Set limit")
-                    st.metric("Assigned to selected paycheck",money(upcoming))
-                    st.write(_bnpl_risk(bal,blim))
-                    if plim and upcoming>plim:
-                        st.error(f"Payday cap exceeded by {money(upcoming-plim)}")
-                    elif plim and upcoming>=plim*.8:
-                        st.warning("This paycheck is close to your BNPL payday cap.")
-
-        with st.expander("⚙️ My Affirm & Klarna spending limits",expanded=False):
-            for provider in ["Affirm","Klarna"]:
-                current=rows("SELECT * FROM finance_limits WHERE provider=?",(provider,))
-                bl=float(current[0]["balance_limit"] or 0) if current else 0
-                pl=float(current[0]["paycheck_limit"] or 0) if current else 0
-                c=st.columns(3)
-                newbl=c[0].number_input(f"{provider} · max total balance",min_value=0.0,value=float(bl),step=25.0,key=f"{provider}_balance_limit")
-                newpl=c[1].number_input(f"{provider} · max from one paycheck",min_value=0.0,value=float(pl),step=10.0,key=f"{provider}_paycheck_limit")
-                if c[2].button(f"Save {provider} limits",key=f"save_{provider}_limits"):
-                    execute("""INSERT INTO finance_limits(provider,balance_limit,paycheck_limit) VALUES(?,?,?)
-                               ON CONFLICT(provider) DO UPDATE SET balance_limit=excluded.balance_limit,paycheck_limit=excluded.paycheck_limit""",
-                            (provider,newbl,newpl)); st.rerun()
-
-        removed=rows("""SELECT i.id,i.due_date,i.amount,p.provider,p.merchant
-                        FROM bnpl_installments i JOIN bnpl_purchases p ON p.id=i.purchase_id
-                        WHERE i.status='Removed from plan' ORDER BY i.due_date""")
-        if removed:
-            with st.expander("↩️ BNPL removed from paycheck plans"):
-                ropts={f"{x['provider']} · {x['merchant']} · {us_date(x['due_date'])} · {money(x['amount'])}":x for x in removed}
-                rchoice=st.selectbox("Restore an installment",["Select..."]+list(ropts.keys()),key="restore_bnpl_choice")
-                if rchoice!="Select..." and st.button("Restore to automatic planning",use_container_width=True):
-                    execute("UPDATE bnpl_installments SET status='Planned' WHERE id=?",(ropts[rchoice]["id"],))
-                    reassign_bnpl_installments()
-                    st.rerun()
-
-        st.markdown("### ➕ Quick Add Purchase")
-        with st.form("quick_bnpl_purchase",clear_on_submit=True):
-            c=st.columns(3)
-            provider=c[0].selectbox("Used",["Affirm","Klarna"])
-            merchant=c[1].text_input("Store / purchase",placeholder="Amazon, SHEIN, JetBlue...")
-            total=c[2].number_input("Purchase total",min_value=0.0,step=5.0)
-            c=st.columns(4)
-            purchase_date=c[0].date_input("Purchase date",date.today(),format="MM/DD/YYYY")
-            frequency=c[1].selectbox("Payments",["Every 2 weeks","Monthly","Weekly"])
-            count=c[2].number_input("# of payments",min_value=1,max_value=36,value=4,step=1)
-            first_date=c[3].date_input("First payment date",date.today(),format="MM/DD/YYYY")
-            c=st.columns(2)
-            first_amount=c[0].number_input("First payment amount (0 = split evenly)",min_value=0.0,step=5.0)
-            note=c[1].text_input("Note")
-            save=st.form_submit_button("Add purchase & build payment schedule",use_container_width=True)
-            if save:
-                bal,blim,plim,_=bnpl_provider_summary(provider,current_pid)
-                projected=bal+total
-                create_bnpl_purchase(provider,merchant,purchase_date,total,frequency,count,first_date,first_amount,note)
-                if blim and projected>blim:
-                    st.session_state["bnpl_warning"]=f"🔴 Recorded, but this puts {provider} {money(projected-blim)} over your personal balance limit."
-                else:
-                    st.session_state["bnpl_warning"]=f"✓ {provider} purchase added and installment schedule created."
-                st.rerun()
-        if st.session_state.get("bnpl_warning"):
-            msg=st.session_state.pop("bnpl_warning")
-            if msg.startswith("🔴"):
-                st.error(msg)
-            else:
-                st.success(msg)
-
-        st.markdown("### Active purchases")
-        purchases=df_from("""SELECT id,provider,merchant,purchase_date,original_amount,remaining_balance,payment_frequency,installment_count,apr,status
-                             FROM bnpl_purchases ORDER BY CASE status WHEN 'Active' THEN 0 ELSE 1 END,purchase_date DESC""")
-        if purchases.empty:
-            st.caption("No Affirm/Klarna purchases recorded yet.")
-        else:
-            st.dataframe(display_df_us(purchases),use_container_width=True,hide_index=True)
-            st.markdown("### ✏️ Correct Affirm / Klarna Information")
-            st.caption("You can fix the original amount, current balance, and APR if the provider/account shows one. APR can stay 0.00 if it does not apply or you do not have one.")
-            active_rows=purchases[purchases["status"].astype(str).eq("Active")]
-            for _,bp in active_rows.iterrows():
-                bid=int(bp["id"])
-                provider=str(bp["provider"]); merchant=str(bp["merchant"])
-                with st.expander(f"{provider} · {merchant}"):
-                    c1,c2,c3=st.columns(3)
-                    orig=c1.number_input(
-                        "Original amount",
-                        min_value=0.0,value=float(bp["original_amount"] or 0),step=5.0,
-                        key=f"bnpl_orig_{bid}"
-                    )
-                    remain=c2.number_input(
-                        "Current balance",
-                        min_value=0.0,value=float(bp["remaining_balance"] or 0),step=5.0,
-                        key=f"bnpl_remain_{bid}"
-                    )
-                    apr_val=c3.number_input(
-                        "APR % (if available)",
-                        min_value=0.0,max_value=100.0,value=float(bp["apr"] or 0),step=0.01,
-                        key=f"bnpl_apr_{bid}"
-                    )
-                    if st.button("💾 Save Changes",key=f"save_bnpl_{bid}",use_container_width=True):
-                        execute("UPDATE bnpl_purchases SET original_amount=?,remaining_balance=?,apr=? WHERE id=?",
-                                (float(orig),float(remain),float(apr_val),bid))
-                        st.success(f"{provider} · {merchant} updated.")
-                        st.rerun()
-
-            active=rows("SELECT * FROM bnpl_purchases WHERE status='Active' ORDER BY provider,merchant")
-            if active:
-                pmap={f"{x['provider']} · {x['merchant']} · remaining {money(x['remaining_balance'])}":x for x in active}
-                chosen=st.selectbox("View payment schedule",list(pmap.keys()),key="bnpl_schedule_purchase")
-                px=pmap[chosen]
-                sched=df_from("SELECT due_date,amount,status,paid_date,paycheck_id FROM bnpl_installments WHERE purchase_id=? ORDER BY due_date",(px["id"],))
-                st.dataframe(display_df_us(sched),use_container_width=True,hide_index=True)
-
-    # ---- CARDS / DEBT ----
     with tabs[2]:
-        st.subheader("💳 Cards & Debt")
-        with st.form("add_debt_connected",clear_on_submit=True):
+        st.subheader("🅰️ Affirm")
+        _render_provider_wallet("Affirm","affirm")
+
+    with tabs[3]:
+        st.subheader("🛍️ Klarna")
+        _render_provider_wallet("Klarna","klarna")
+
+    # 5 SAVINGS — account goal + sinking funds
+    with tabs[4]:
+        st.subheader("🏦 Savings")
+        st.write("Build your actual savings account and separate sinking funds for trips, birthdays, big purchases, or anything else.")
+        with st.form("new_savings_goal",clear_on_submit=True):
             c=st.columns(4)
-            name=c[0].text_input("Account")
-            bal=c[1].number_input("Balance",min_value=0.0,step=25.0)
-            apr=c[2].number_input("APR %",min_value=0.0,step=.1)
-            minimum=c[3].number_input("Minimum payment",min_value=0.0,step=5.0)
-            if st.form_submit_button("Add debt / credit card"):
-                execute("INSERT INTO debts(name,balance,apr,min_payment,due_day,note) VALUES(?,?,?,?,?,?)",(name,bal,apr,minimum,1,""))
+            gname=c[0].text_input("Savings goal",placeholder="Emergency Savings, Jamaica Trip...")
+            gtype=c[1].selectbox("Type",["Savings Account","Trip / Vacation","Big Event","Big Purchase","Emergency Fund","Other"])
+            target=c[2].number_input("Goal amount",min_value=0.0,step=50.0)
+            current=c[3].number_input("Already saved",min_value=0.0,step=25.0)
+            c=st.columns(3)
+            target_date=c[0].date_input("Target date",date.today()+timedelta(days=365),format="MM/DD/YYYY")
+            percheck=c[1].number_input("Plan per paycheck",min_value=0.0,step=10.0)
+            priority=c[2].selectbox("Priority",["High","Medium","Low"])
+            if st.form_submit_button("Create Savings Plan",use_container_width=True):
+                execute("""INSERT INTO savings_goals(name,goal_type,target_amount,current_amount,target_date,priority,contribution_frequency,note)
+                           VALUES(?,?,?,?,?,?,?,?)""",(gname,gtype,target,current,target_date.isoformat(),priority,f"{percheck:.2f} per paycheck",""))
                 st.rerun()
+
+        goals=rows("SELECT * FROM savings_goals ORDER BY priority,target_date,id")
+        for g in goals:
+            gid=g["id"]; target=float(g["target_amount"] or 0); cur=float(g["current_amount"] or 0)
+            with st.container(border=True):
+                st.markdown(f"### {g['name']}")
+                c=st.columns(4)
+                c[0].metric("Saved",money(cur))
+                c[1].metric("Goal",money(target))
+                c[2].metric("Left",money(max(0,target-cur)))
+                c[3].metric("Target",us_date(g["target_date"]))
+                if target>0: st.progress(min(1.0,cur/target),text=f"{min(100,cur/target*100):.0f}% funded")
+                st.caption(f"{g['goal_type']} · {g['contribution_frequency'] or ''}")
+
+                with st.form(f"save_to_goal_{gid}",clear_on_submit=True):
+                    c=st.columns(4)
+                    amt=c[0].number_input("Payment to myself",min_value=0.0,step=10.0,key=f"sg_amt_{gid}")
+                    d=c[1].date_input("Date",date.today(),format="MM/DD/YYYY",key=f"sg_date_{gid}")
+                    pays=rows("SELECT * FROM paychecks ORDER BY pay_date DESC")
+                    pchoices=["Not tied to a paycheck"]+[_safe_paycheck_label(p) for p in pays]
+                    psel=c[2].selectbox("From paycheck",pchoices,key=f"sg_pay_{gid}")
+                    note=c[3].text_input("Note",key=f"sg_note_{gid}")
+                    if st.form_submit_button("💾 Save Contribution"):
+                        pid=None
+                        if psel!="Not tied to a paycheck":
+                            pid=next(p["id"] for p in pays if _safe_paycheck_label(p)==psel)
+                        execute("INSERT INTO savings_contributions(goal_id,contrib_date,amount,note,paycheck_id) VALUES(?,?,?,?,?)",(gid,d.isoformat(),amt,note,pid))
+                        execute("UPDATE savings_goals SET current_amount=COALESCE(current_amount,0)+? WHERE id=?",(amt,gid))
+                        st.rerun()
+                with st.expander("Withdraw / use money from this fund"):
+                    wa=st.number_input("Amount to use",min_value=0.0,max_value=max(cur,0.0),step=10.0,key=f"withdraw_{gid}")
+                    if st.button("Record Withdrawal",key=f"withdraw_btn_{gid}",disabled=wa<=0):
+                        execute("INSERT INTO savings_contributions(goal_id,contrib_date,amount,note,paycheck_id) VALUES(?,?,?,?,NULL)",(gid,date.today().isoformat(),-wa,"Withdrawal / used from fund"))
+                        execute("UPDATE savings_goals SET current_amount=MAX(0,COALESCE(current_amount,0)-?) WHERE id=?",(wa,gid)); st.rerun()
+
+    # Cards
+    with tabs[5]:
+        st.subheader("💳 Cards & Debt")
         debts=df_from("SELECT * FROM debts ORDER BY balance DESC")
         if not debts.empty:
-            st.metric("Credit card / other debt total",money(debts.balance.sum()))
-            st.markdown("### 💳 Credit Card Paydown Coach")
-            st.caption("The starting APRs for Chase and Capital One are conservative public-rate estimates—not your personal account APR. Enter the Purchase APR from your latest statement for exact planning.")
-
-            cards=debts[debts["name"].astype(str).str.lower().str.contains("chase|capital",regex=True)]
-            for _,card in cards.iterrows():
-                cid=int(card["id"]); cname=str(card["name"])
-                balance=float(card["balance"] or 0); saved_apr=float(card["apr"] or 0)
-                if saved_apr<=0:
-                    saved_apr=28.24 if "chase" in cname.lower() else 28.99
-
+            st.metric("Total card / debt balance",money(debts.balance.sum()))
+            for _,card in debts.iterrows():
+                cid=int(card["id"]); cname=str(card["name"]); bal=float(card["balance"] or 0); apr=float(card["apr"] or 0)
                 with st.container(border=True):
-                    st.markdown(f"#### {cname}")
-                    st.caption("Use these fields to correct the saved information. Nothing changes until you press Save Changes.")
+                    c=st.columns(3)
+                    nb=c[0].number_input(f"{cname} balance",min_value=0.0,value=bal,step=25.0,key=f"ccbal_{cid}")
+                    na=c[1].number_input(f"{cname} APR %",min_value=0.0,max_value=50.0,value=apr,step=.01,key=f"ccapr_{cid}")
+                    nm=c[2].number_input(f"{cname} minimum",min_value=0.0,value=float(card["min_payment"] or 0),step=5.0,key=f"ccmin_{cid}")
+                    interest=nb*(na/100)/12
+                    st.caption(f"Estimated monthly interest: {money(interest)}. Paying {money(max(nm,interest+100))} would target about $100 of principal beyond estimated interest.")
+                    if st.button("💾 Save Changes",key=f"ccsave_{cid}",use_container_width=True):
+                        execute("UPDATE debts SET balance=?,apr=?,min_payment=? WHERE id=?",(nb,na,nm,cid)); st.rerun()
 
-                    c1,c2,c3=st.columns(3)
-                    edit_balance=c1.number_input(
-                        f"{cname} balance",
-                        min_value=0.0,value=float(balance),step=25.0,
-                        key=f"edit_card_balance_{cid}"
-                    )
-                    exact_apr=c2.number_input(
-                        f"{cname} Purchase APR (%)",
-                        min_value=0.0,max_value=50.0,value=float(saved_apr),step=0.01,
-                        key=f"card_apr_{cid}",
-                        help="Use the Purchase APR from your most recent statement."
-                    )
-                    edit_min=c3.number_input(
-                        f"{cname} minimum payment",
-                        min_value=0.0,value=float(card["min_payment"] or 0),step=5.0,
-                        key=f"edit_card_min_{cid}"
-                    )
-
-                    principal_goal=st.number_input(
-                        f"How much {cname} principal do you want to knock off this month?",
-                        min_value=0.0,value=100.0,step=25.0,key=f"principal_goal_{cid}"
-                    )
-
-                    est_interest=float(edit_balance)*(float(exact_apr)/100.0)/12.0
-                    recommended=max(float(edit_min),est_interest+float(principal_goal))
-                    after=max(0.0,float(edit_balance)-float(principal_goal))
-
-                    a,b,c=st.columns(3)
-                    a.metric("Est. interest this month",money(est_interest))
-                    b.metric("Suggested payment",money(recommended))
-                    c.metric("Est. balance after principal",money(after))
-
-                    if st.button(f"💾 Save {cname} Changes",key=f"save_card_changes_{cid}",use_container_width=True):
-                        execute("UPDATE debts SET balance=?,apr=?,min_payment=? WHERE id=?",
-                                (float(edit_balance),float(exact_apr),float(edit_min),cid))
-                        st.success(f"{cname} information saved.")
-                        st.rerun()
-
-            st.markdown("### All Cards / Debt")
-            st.dataframe(display_df_us(debts),use_container_width=True,hide_index=True)
-            st.caption("Use Paycheck Command → Credit Card to plan what each paycheck sends toward these accounts.")
-
-    # ---- SHARED / RANDI ----
-    with tabs[3]:
-        st.subheader("🏠 Shared Money / Randi")
-        held,owed,physical=roommate_summary()
-        c=st.columns(3)
-        c[0].metric("Money held",money(held))
-        c[1].metric("Temporarily used / owe back",money(owed))
-        c[2].metric("Physically available",money(physical))
-        st.info("Held money stays protected from ChapLife's ordinary 'available to spend' thinking.")
-
-        st.markdown("### 💸 Borrowed From Randi")
-        st.caption("Use this when you temporarily use money from Randi's held money. It increases what you owe back and lowers the physically available protected money.")
-        with st.form("randi_borrow_connected",clear_on_submit=True):
-            c=st.columns(3)
-            bd=c[0].date_input("Date borrowed",date.today(),format="MM/DD/YYYY",key="randi_borrow_date")
-            ba=c[1].number_input("Amount borrowed",min_value=0.0,step=10.0,key="randi_borrow_amt")
-            bn=c[2].text_input("What was it for?",key="randi_borrow_note")
-            if st.form_submit_button("Record Money Borrowed",use_container_width=True):
-                if ba>0:
-                    execute("INSERT INTO roommate_ledger(tx_date,action,amount,note) VALUES(?,?,?,?)",
-                            (bd.isoformat(),"Temporary Use",float(ba),bn))
-                    st.success(f"Recorded {money(ba)} borrowed from Randi's held money.")
-                    st.rerun()
-
-        with st.form("randi_repay_connected",clear_on_submit=True):
-            c=st.columns(3)
-            rd=c[0].date_input("Date paid back",date.today(),format="MM/DD/YYYY",key="randi_repay_date")
-            ra=c[1].number_input("Amount paid back",min_value=0.0,step=10.0,key="randi_repay_amt")
-            rn=c[2].text_input("Repayment note",key="randi_repay_note")
-            if st.form_submit_button("Record Money Paid Back",use_container_width=True):
-                if ra>0:
-                    execute("INSERT INTO roommate_ledger(tx_date,action,amount,note) VALUES(?,?,?,?)",
-                            (rd.isoformat(),"Payback",float(ra),rn))
-                    st.success(f"Recorded {money(ra)} paid back to Randi.")
-                    st.rerun()
-
-        # Keep existing shared household entry workflow from existing tables.
-        with st.form("roommate_receive_connected",clear_on_submit=True):
-            c=st.columns(3)
-            d=c[0].date_input("Received",date.today(),format="MM/DD/YYYY",key="shared_recv_date")
-            amt=c[1].number_input("Amount received",min_value=0.0,step=25.0,key="shared_recv_amt")
-            note=c[2].text_input("Note",placeholder="Rent / bills / hold",key="shared_recv_note")
-            if st.form_submit_button("Record shared money"):
-                pid=execute("INSERT INTO roommate_payments(received_date,total_amount,note) VALUES(?,?,?)",(d.isoformat(),amt,note))
-                execute("INSERT INTO roommate_ledger(tx_date,action,amount,note) VALUES(?,?,?,?)",(d.isoformat(),"Hold Added",amt,note))
-                st.rerun()
-        ledger=df_from("SELECT * FROM roommate_ledger ORDER BY tx_date DESC,id DESC")
-        if not ledger.empty: st.dataframe(display_df_us(ledger),use_container_width=True,hide_index=True)
-
-    # ---- BILLS / SPENDING ----
-    with tabs[4]:
-        st.subheader("📋 Bills & Spending")
-
-        st.markdown("### 📅 What's Coming Up")
+    # Bills
+    with tabs[6]:
+        st.subheader("📅 Bills & Spending")
         due_rows=rows("SELECT * FROM recurring_due_dates WHERE active=1 ORDER BY due_day,name")
-        if due_rows:
-            upcoming=[]
-            for x in due_rows:
-                nd=next_monthly_due(x["due_day"])
-                upcoming.append({
-                    "Next Due":us_date(nd),
-                    "Bill":x["name"],
-                    "Amount":money(float(x["amount"] or 0)),
-                    "Due Day":int(x["due_day"]),
-                    "Category":x["category"] or "",
-                    "Old Sheet Label":x["source_label"] or ""
-                })
-            upcoming=sorted(upcoming,key=lambda x:datetime.strptime(x["Next Due"],"%m/%d/%Y"))[:12]
+        upcoming=[]
+        for x in due_rows:
+            nd=next_monthly_due(x["due_day"])
+            upcoming.append({"Next Due":us_date(nd),"Bill":x["name"],"Amount":money(x["amount"]),"Due Day":x["due_day"],"Category":x["category"]})
+        if upcoming:
+            upcoming=sorted(upcoming,key=lambda x:datetime.strptime(x["Next Due"],"%m/%d/%Y"))
             st.dataframe(pd.DataFrame(upcoming),use_container_width=True,hide_index=True)
-            st.caption("The old sheet labels like “Rocket 12/2” are now tracked as a recurring bill due on the 2nd of each month.")
-
-        with st.expander("✏️ Edit recurring due dates / amounts"):
+        with st.expander("✏️ Edit due date / amount"):
             all_due=rows("SELECT * FROM recurring_due_dates ORDER BY due_day,name")
             if all_due:
                 choices={f"{x['name']} · day {x['due_day']}":x for x in all_due}
-                chosen=st.selectbox("Bill to edit",list(choices.keys()),key="edit_due_bill")
-                x=choices[chosen]
+                x=choices[st.selectbox("Bill",list(choices.keys()))]
                 c=st.columns(3)
-                eday=c[0].number_input("Due day",min_value=1,max_value=31,value=int(x["due_day"]),step=1,key=f"due_day_{x['id']}")
-                eamt=c[1].number_input("Amount",min_value=0.0,value=float(x["amount"] or 0),step=1.0,key=f"due_amt_{x['id']}")
-                active=c[2].checkbox("Active",value=bool(x["active"]),key=f"due_active_{x['id']}")
-                if st.button("💾 Save Due-Date Changes",key=f"save_due_{x['id']}",use_container_width=True):
-                    execute("UPDATE recurring_due_dates SET due_day=?,amount=?,active=? WHERE id=?",
-                            (int(eday),float(eamt),1 if active else 0,int(x["id"])))
-                    st.success("Due-date information saved.")
-                    st.rerun()
+                dd=c[0].number_input("Due day",1,31,int(x["due_day"]))
+                aa=c[1].number_input("Amount",min_value=0.0,value=float(x["amount"] or 0),step=1.0)
+                active=c[2].checkbox("Active",value=bool(x["active"]))
+                if st.button("Save Bill Changes"):
+                    execute("UPDATE recurring_due_dates SET due_day=?,amount=?,active=? WHERE id=?",(dd,aa,1 if active else 0,x["id"])); st.rerun()
 
-        with st.expander("➕ Add another recurring bill"):
-            with st.form("add_recurring_bill",clear_on_submit=True):
-                c=st.columns(4)
-                rn=c[0].text_input("Bill name")
-                ra=c[1].number_input("Amount",min_value=0.0,step=1.0)
-                rd=c[2].number_input("Due day",min_value=1,max_value=31,value=1,step=1)
-                rc=c[3].selectbox("Category",["Housing","Utilities","Insurance","Debt","Subscription","Phone","Travel","Other"])
-                if st.form_submit_button("Save Recurring Bill",use_container_width=True):
-                    if rn.strip():
-                        execute("""INSERT INTO recurring_due_dates(name,amount,due_day,category,source_label,active,note)
-                                   VALUES(?,?,?,?,?,1,?)""",
-                                (rn.strip(),float(ra),int(rd),rc,"Manual","Added in ChapLife"))
-                        st.rerun()
-
-        st.divider()
-        with st.form("connected_tx",clear_on_submit=True):
-            c=st.columns(4)
-            d=c[0].date_input("Date",date.today(),format="MM/DD/YYYY",key="connected_txdate")
-            typ=c[1].selectbox("Type",["Expense","Income","Transfer"],key="connected_txtype")
-            cat=c[2].selectbox("Category",["Housing","Utilities","Food","Groceries","Transportation","Debt","Savings","Personal","Entertainment","Medical","Gifts","Subscription","Travel","Other"],key="connected_txcat")
-            merchant=c[3].text_input("Merchant / description",key="connected_txmerchant")
-            amount=st.number_input("Amount",min_value=0.0,step=5.0,key="connected_txamount")
-            if st.form_submit_button("Save transaction"):
-                execute("""INSERT INTO finance_transactions(tx_date,amount,tx_type,category,subcategory,need_want,merchant,note)
-                           VALUES(?,?,?,?,?,?,?,?)""",(d.isoformat(),amount,typ,cat,"Manual","",merchant,""))
-                st.rerun()
-        tx=df_from("SELECT * FROM finance_transactions ORDER BY tx_date DESC,id DESC LIMIT 100")
-        if not tx.empty: st.dataframe(display_df_us(tx),use_container_width=True,hide_index=True)
-
-    # ---- SAVINGS ----
-    with tabs[5]:
-        st.subheader("🎯 Savings")
-        goals=df_from("SELECT * FROM savings_goals ORDER BY priority,target_date")
-        if not goals.empty: st.dataframe(display_df_us(goals),use_container_width=True,hide_index=True)
-        st.caption("Savings amounts planned from a specific paycheck can be added directly in Paycheck Command.")
-
-    # ---- ONE-TIME MIGRATION / BACKUP ----
-    with tabs[6]:
-        if finance_migration_done():
-            st.subheader("✅ Old Budget Migrated")
-            st.success("ChapLife is now your primary finance tracker. You do not need to keep updating the old spreadsheet.")
-        else:
-            st.subheader("📥 Move My Old Budget Into ChapLife")
-            st.markdown("### 📤 UPLOAD OLD BUDGET SHEET HERE")
-            st.info("This is a one-time migration. After you review the preview and import it, ChapLife becomes the main place you maintain your finances.")
-            st.write("Newest paycheck on or before today + the 3 before it are kept as history. Future paycheck dates stay Planned.")
-            st.caption("Google Sheets → File → Download → Microsoft Excel (.xlsx). Upload that downloaded file here. Nothing imports until you approve the preview.")
-            up=st.file_uploader("Choose your old Excel budget file",type=["xlsx","xls","csv"],key="legacy_budget_upload",help="Google Sheets: File → Download → Microsoft Excel (.xlsx)")
-            if up is not None:
-                try:
-                    st.session_state["migration_findings"]=parse_budget_upload(up)
-                    st.session_state["migration_source_name"]=up.name
-                except Exception as e:
-                    st.error(str(e))
-            found=st.session_state.get("migration_findings")
-            if found:
-                st.markdown("### 🔎 Migration Preview — nothing has been imported yet")
-                c=st.columns(2)
-                c[0].metric("Paychecks found",len(found.get("paychecks",[])))
-                c[1].metric("Plan items found",len(found.get("plan_items",[])))
-                if found.get("paychecks"): st.dataframe(pd.DataFrame(found["paychecks"]),use_container_width=True,hide_index=True)
-                if found.get("plan_items"): st.dataframe(pd.DataFrame(found["plan_items"]),use_container_width=True,hide_index=True)
-                ok=st.checkbox("I reviewed the preview and want to import these records.",key="migration_confirm")
-                if st.button("🚚 Import & Retire Old Budget",type="primary",use_container_width=True,disabled=not ok):
-                    n=import_budget_findings(found,st.session_state.get("migration_source_name","Old budget"))
-                    st.session_state.pop("migration_findings",None)
-                    st.success(f"Migration complete. {n} paycheck record(s) imported under the recent-paycheck rule.")
-                    st.rerun()
-
-        st.divider()
-        st.subheader("🛟 Finance Backup & Restore")
-        backup=json.dumps(finance_backup_payload(),indent=2,default=str).encode("utf-8")
-        st.download_button("⬇️ Download Finance Backup",data=backup,file_name=f"ChapLife_Finance_Backup_{date.today().strftime('%m-%d-%Y')}.json",mime="application/json",use_container_width=True)
-        restore=st.file_uploader("Restore a ChapLife Finance backup",type=["json"],key="finance_restore")
-        if restore is not None:
-            st.warning("Restore replaces the current Finance records with the backup.")
-            if st.checkbox("I understand and want to restore this backup.",key="restore_confirm"):
-                if st.button("♻️ Restore Finance Backup",use_container_width=True):
-                    restore_finance_backup(json.loads(restore.getvalue().decode("utf-8"))); st.rerun()
-
-    # ---- MONEY SETTINGS ----
+    # Randi
     with tabs[7]:
+        st.subheader("🤝 Randi / Protected Money")
+        held,owed,physical=roommate_summary()
+        c=st.columns(3); c[0].metric("Money held",money(held)); c[1].metric("Borrowed / owe back",money(owed)); c[2].metric("Physically available",money(physical))
+        with st.form("randi_borrow_new",clear_on_submit=True):
+            c=st.columns(3)
+            d=c[0].date_input("Date borrowed",date.today(),format="MM/DD/YYYY")
+            amt=c[1].number_input("Amount borrowed",min_value=0.0,step=10.0)
+            note=c[2].text_input("What was it for?")
+            if st.form_submit_button("Record Borrowed Money"):
+                execute("INSERT INTO roommate_ledger(tx_date,action,amount,note) VALUES(?,?,?,?)",(d.isoformat(),"Temporary Use",amt,note)); st.rerun()
+        with st.form("randi_repay_new",clear_on_submit=True):
+            c=st.columns(3)
+            d=c[0].date_input("Date paid back",date.today(),format="MM/DD/YYYY")
+            amt=c[1].number_input("Amount paid back",min_value=0.0,step=10.0)
+            note=c[2].text_input("Note")
+            if st.form_submit_button("Record Payback"):
+                execute("INSERT INTO roommate_ledger(tx_date,action,amount,note) VALUES(?,?,?,?)",(d.isoformat(),"Payback",amt,note)); st.rerun()
+        ledger=df_from("SELECT * FROM roommate_ledger ORDER BY tx_date DESC,id DESC")
+        if not ledger.empty: st.dataframe(display_df_us(ledger),use_container_width=True,hide_index=True)
+
+    with tabs[8]:
+        st.subheader("📊 Reports")
+        tx=df_from("SELECT * FROM finance_transactions ORDER BY tx_date DESC,id DESC LIMIT 200")
+        if not tx.empty: st.dataframe(display_df_us(tx),use_container_width=True,hide_index=True)
+        contrib=df_from("""SELECT c.contrib_date,g.name,c.amount,c.note FROM savings_contributions c
+                           JOIN savings_goals g ON g.id=c.goal_id ORDER BY c.contrib_date DESC,c.id DESC""")
+        if not contrib.empty:
+            st.markdown("### Savings activity")
+            st.dataframe(display_df_us(contrib),use_container_width=True,hide_index=True)
+
+    with tabs[9]:
         st.subheader("⚙️ Money Settings")
-        st.write("Affirm/Klarna limits live in the BNPL tab. Paycheck allocations, debt, held money and transactions all use the same finance database.")
-        st.caption("Personal limits are your own guardrails; they do not change the limit shown by Affirm or Klarna.")
-        st.divider()
-        st.markdown("#### Old budget migration")
-        if finance_migration_done():
-            st.success("Old budget is marked migrated / retired.")
-            if st.button("Allow budget upload again",use_container_width=True,key="reopen_budget_migration"):
-                execute("DELETE FROM finance_migration_state WHERE id=1")
-                st.rerun()
-        else:
-            st.caption("Old budget has not been migrated yet.")
-
-
+        st.caption("Dates display MM/DD/YYYY. Times display with AM/PM.")
+        st.markdown("### 🛟 Finance Backup")
+        backup=json.dumps(finance_backup_payload(),indent=2,default=str).encode("utf-8")
+        st.download_button("Download Finance Backup",backup,file_name=f"ChapLife_Finance_Backup_{date.today().strftime('%m-%d-%Y')}.json",mime="application/json",use_container_width=True)
 
 def _finances_legacy():
     st.title('💰 Finances')
@@ -2620,29 +2463,53 @@ def _local_reflection_reply(s):
 
 def reflection_coach():
     st.title("🪞 Honest Reflection Coach")
-    st.caption("Direct, practical reflection—not a licensed therapist, diagnosis, or emergency service.")
-    st.info("This coach is meant to challenge your thinking when needed, not simply agree with you.")
+    st.caption("Private reflection coach · honest, practical, and willing to challenge you.")
 
-    prompt=st.text_area("What happened? Tell it like you would tell a friend.",height=180,
-                        placeholder="What happened, what was said/done, what you're thinking, and what you want to do...")
-    mode=st.radio("How do you want me to respond?",["Balanced","More direct","Gentle but honest"],horizontal=True)
-    if st.button("Talk it through",type="primary",use_container_width=True):
-        if not prompt.strip():
-            st.warning("Tell me what happened first.")
+    threads=rows("SELECT * FROM coach_threads ORDER BY updated_at DESC,id DESC")
+    c=st.columns([1,3])
+    if c[0].button("＋ New Chat",use_container_width=True):
+        tid=execute("INSERT INTO coach_threads(title,created_at,updated_at) VALUES(?,?,?)",
+                    ("New conversation",datetime.now().isoformat(),datetime.now().isoformat()))
+        st.session_state["coach_thread_id"]=tid; st.rerun()
+    if not threads:
+        tid=execute("INSERT INTO coach_threads(title,created_at,updated_at) VALUES(?,?,?)",
+                    ("New conversation",datetime.now().isoformat(),datetime.now().isoformat()))
+        st.session_state["coach_thread_id"]=tid; st.rerun()
+    threads=rows("SELECT * FROM coach_threads ORDER BY updated_at DESC,id DESC")
+    labels={f"{t['title']} · {us_date(t['created_at'])}":t for t in threads}
+    current_id=st.session_state.get("coach_thread_id",threads[0]["id"])
+    default=next((k for k,v in labels.items() if v["id"]==current_id),list(labels)[0])
+    selected=c[1].selectbox("Conversation",list(labels.keys()),index=list(labels.keys()).index(default),label_visibility="collapsed")
+    tid=labels[selected]["id"]; st.session_state["coach_thread_id"]=tid
+
+    msgs=rows("SELECT * FROM coach_messages WHERE thread_id=? ORDER BY id",(tid,))
+    if not msgs:
+        with st.chat_message("assistant"):
+            st.write("What’s going on?")
+    for m in msgs:
+        with st.chat_message("user" if m["role"]=="user" else "assistant"):
+            st.write(m["content"])
+
+    prompt=st.chat_input("Message your reflection coach…")
+    if prompt:
+        execute("INSERT INTO coach_messages(thread_id,role,content,created_at) VALUES(?,?,?,?)",(tid,"user",prompt,datetime.now().isoformat()))
+        history=rows("SELECT role,content FROM coach_messages WHERE thread_id=? ORDER BY id",(tid,))
+        context="\n".join(f"{x['role'].upper()}: {x['content']}" for x in history[-14:])
+        reply=_openai_reflection_reply("Continue this private conversation naturally. Remember prior messages in this thread.\n"+context) or _local_reflection_reply(prompt)
+        execute("INSERT INTO coach_messages(thread_id,role,content,created_at) VALUES(?,?,?,?)",(tid,"assistant",reply,datetime.now().isoformat()))
+        if len(msgs)==0:
+            title=(prompt[:42]+"…") if len(prompt)>42 else prompt
+            execute("UPDATE coach_threads SET title=?,updated_at=? WHERE id=?",(title,datetime.now().isoformat(),tid))
         else:
-            wrapped=f"Response style: {mode}. Situation: {prompt.strip()}"
-            reply=_openai_reflection_reply(wrapped) or _local_reflection_reply(prompt.strip())
-            st.session_state["reflection_reply"]=reply
-            execute("INSERT INTO reflection_log(log_date,situation,response,source) VALUES(?,?,?,?)",
-                    (date.today().isoformat(),prompt.strip(),reply,"AI" if _secret("OPENAI_API_KEY") else "Local coach"))
-    if st.session_state.get("reflection_reply"):
-        st.markdown("### What I think")
-        st.write(st.session_state["reflection_reply"])
+            execute("UPDATE coach_threads SET updated_at=? WHERE id=?",(datetime.now().isoformat(),tid))
+        st.rerun()
 
-    with st.expander("Recent reflections"):
-        hist=df_from("SELECT log_date,situation,response,source FROM reflection_log ORDER BY id DESC LIMIT 10")
-        if not hist.empty:
-            st.dataframe(display_df_us(hist),use_container_width=True,hide_index=True)
+    with st.expander("About this coach"):
+        st.caption("This is a reflection tool, not a licensed therapist, diagnosis, or emergency service.")
+        if st.button("Delete this conversation",key=f"delete_thread_{tid}"):
+            execute("DELETE FROM coach_messages WHERE thread_id=?",(tid,))
+            execute("DELETE FROM coach_threads WHERE id=?",(tid,))
+            st.session_state.pop("coach_thread_id",None); st.rerun()
 
 # ---------- Smart Trainer ----------
 GYM_EQUIPMENT={
@@ -2680,29 +2547,58 @@ SMART_EXERCISES=[
 ]
 
 def exercise_animation(name,kind):
-    # Lightweight animated SVG stored directly in the app; no external image dependency.
-    motions={
-        "squat":"translate(0,8)","hinge":"rotate(15 60 50)","press":"translate(0,-7)",
-        "row":"translate(-8,0)","curl":"rotate(-18 60 58)","bridge":"translate(0,-6)",
-        "step":"translate(8,-6)","core":"rotate(6 60 55)","cardio":"translate(8,0)"
-    }
-    motion=motions.get(kind,"translate(5,0)")
-    return f"""
-    <div style='border:1px solid #ddd;border-radius:14px;padding:8px;max-width:240px'>
-      <svg viewBox='0 0 120 120' width='100%' height='150' role='img' aria-label='{html.escape(name)} animated demonstration'>
-        <line x1='20' y1='105' x2='100' y2='105' stroke='currentColor' stroke-width='3'/>
-        <g style='transform-origin:60px 60px;animation:move 1.3s ease-in-out infinite alternate'>
-          <circle cx='60' cy='25' r='10' fill='none' stroke='currentColor' stroke-width='4'/>
-          <line x1='60' y1='35' x2='60' y2='68' stroke='currentColor' stroke-width='5'/>
-          <line x1='60' y1='45' x2='43' y2='58' stroke='currentColor' stroke-width='4'/>
-          <line x1='60' y1='45' x2='78' y2='55' stroke='currentColor' stroke-width='4'/>
-          <line x1='60' y1='68' x2='45' y2='95' stroke='currentColor' stroke-width='5'/>
-          <line x1='60' y1='68' x2='78' y2='95' stroke='currentColor' stroke-width='5'/>
-        </g>
-      </svg>
-      <style>@keyframes move{{from{{transform:none}}to{{transform:{motion}}}}}</style>
-      <div style='font-weight:700;text-align:center'>{html.escape(name)}</div>
-    </div>"""
+    # Exercise-specific animated demonstration: body position + equipment move together.
+    # This is intentionally simple, but the movement shown corresponds to the exercise family.
+    safe=html.escape(name)
+    if kind=="curl":
+        moving="""<line x1='60' y1='48' x2='78' y2='62' stroke='currentColor' stroke-width='4'/>
+        <circle cx='82' cy='67' r='5' fill='none' stroke='currentColor' stroke-width='3'/>"""
+        transform="rotate(-55deg 60px 48px)"
+    elif kind=="hinge":
+        moving="""<line x1='60' y1='36' x2='72' y2='68' stroke='currentColor' stroke-width='5'/>
+        <line x1='72' y1='68' x2='72' y2='90' stroke='currentColor' stroke-width='3'/>
+        <rect x='65' y='88' width='14' height='10' rx='4' fill='none' stroke='currentColor' stroke-width='3'/>"""
+        transform="rotate(28deg 60px 68px)"
+    elif kind=="squat":
+        moving="""<line x1='60' y1='36' x2='60' y2='68' stroke='currentColor' stroke-width='5'/>
+        <line x1='60' y1='68' x2='43' y2='86' stroke='currentColor' stroke-width='5'/>
+        <line x1='43' y1='86' x2='36' y2='103' stroke='currentColor' stroke-width='5'/>
+        <line x1='60' y1='68' x2='77' y2='86' stroke='currentColor' stroke-width='5'/>
+        <line x1='77' y1='86' x2='84' y2='103' stroke='currentColor' stroke-width='5'/>"""
+        transform="translateY(15px)"
+    elif kind=="press":
+        moving="""<line x1='60' y1='47' x2='44' y2='36' stroke='currentColor' stroke-width='4'/>
+        <line x1='60' y1='47' x2='76' y2='36' stroke='currentColor' stroke-width='4'/>
+        <circle cx='40' cy='33' r='4' fill='none' stroke='currentColor' stroke-width='3'/>
+        <circle cx='80' cy='33' r='4' fill='none' stroke='currentColor' stroke-width='3'/>"""
+        transform="translateY(-15px)"
+    elif kind=="row":
+        moving="""<line x1='60' y1='48' x2='82' y2='55' stroke='currentColor' stroke-width='4'/>
+        <line x1='82' y1='55' x2='98' y2='55' stroke='currentColor' stroke-width='3'/>"""
+        transform="translateX(-18px)"
+    elif kind=="bridge":
+        moving="""<line x1='30' y1='75' x2='62' y2='75' stroke='currentColor' stroke-width='5'/>
+        <line x1='62' y1='75' x2='82' y2='92' stroke='currentColor' stroke-width='5'/>"""
+        transform="translateY(-12px)"
+    elif kind=="cardio":
+        moving="""<line x1='60' y1='68' x2='42' y2='95' stroke='currentColor' stroke-width='5'/>
+        <line x1='60' y1='68' x2='82' y2='86' stroke='currentColor' stroke-width='5'/>"""
+        transform="translateX(10px)"
+    else:
+        moving="""<line x1='60' y1='68' x2='45' y2='95' stroke='currentColor' stroke-width='5'/>
+        <line x1='60' y1='68' x2='78' y2='95' stroke='currentColor' stroke-width='5'/>"""
+        transform="translateY(-6px)"
+    return f"""<div style='border:1px solid #ddd;border-radius:14px;padding:8px;max-width:260px'>
+    <svg viewBox='0 0 120 120' width='100%' height='160'>
+      <line x1='15' y1='105' x2='105' y2='105' stroke='currentColor' stroke-width='3'/>
+      <circle cx='60' cy='25' r='10' fill='none' stroke='currentColor' stroke-width='4'/>
+      <line x1='60' y1='35' x2='60' y2='68' stroke='currentColor' stroke-width='5'/>
+      <line x1='60' y1='48' x2='44' y2='58' stroke='currentColor' stroke-width='4'/>
+      <g class='motion'>{moving}</g>
+    </svg>
+    <style>.motion{{transform-origin:center;animation:rep 1.2s ease-in-out infinite alternate}}
+    @keyframes rep{{from{{transform:none}}to{{transform:{transform}}}}}</style>
+    <div style='font-weight:700;text-align:center'>{safe}</div></div>"""
 
 def build_smart_workout(gym,available,goal,focus,mins,level,days=1):
     allowed=set(available)
@@ -2746,7 +2642,17 @@ def trainer():
         goal=c[0].selectbox("Goal",["Lose weight","Build strength","Tone / definition","Improve stamina","General fitness"])
         focus=c[1].selectbox("Focus",["Full Body","Lower Body","Upper Body","Core","Cardio"])
         level=c[2].selectbox("Level",["Beginner","Easy","Moderate","Challenging"])
-        days_per_week=c[3].selectbox("Workout days / week",[2,3,4,5,6],index=1)
+        days_per_week=c[3].selectbox("Workout days / week",[2,3,4,5,6],index=1) if horizon!="Today" else 1
+
+        weekdays=["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]
+        selected_days=[]
+        if horizon!="Today":
+            defaults=weekdays[:int(days_per_week)]
+            selected_days=st.multiselect("Which days do you want to work out?",weekdays,default=defaults,max_selections=int(days_per_week))
+            if len(selected_days)!=int(days_per_week):
+                st.caption(f"Choose {int(days_per_week)} workout days so each workout has a real day.")
+        else:
+            selected_days=[date.today().strftime("%A")]
 
         default_equipment=GYM_EQUIPMENT[gym]
         available=st.multiselect("Equipment available today",sorted(set(sum(GYM_EQUIPMENT.values(),[]))),
@@ -2759,12 +2665,24 @@ def trainer():
                 execute("INSERT INTO weight_log(log_date,weight,note) VALUES(?,?,?)",(date.today().isoformat(),float(weight),"Saved from My Trainer"))
             else:
                 execute("UPDATE weight_log SET weight=? WHERE log_date=?",(float(weight),date.today().isoformat()))
-            days=1 if horizon=="Today" else days_per_week if horizon=="1 Week" else days_per_week*4
-            plan=build_smart_workout(gym,available,goal,focus,mins,level,days)
-            st.session_state["smart_training_plan"]={
-                "horizon":horizon,"gym":gym,"weight":weight,"goal":goal,"focus":focus,"mins":mins,
-                "level":level,"days_per_week":days_per_week,"plan":plan,"limitations":limitations
-            }
+            if horizon!="Today" and len(selected_days)!=int(days_per_week):
+                st.warning("Choose all of your workout days first.")
+            else:
+                days=1 if horizon=="Today" else int(days_per_week) if horizon=="1 Week" else int(days_per_week)*4
+                plan=build_smart_workout(gym,available,goal,focus,mins,level,days)
+                labels=[]
+                if horizon=="Today":
+                    labels=["Today"]
+                elif horizon=="1 Week":
+                    labels=selected_days
+                else:
+                    for wk in range(1,5):
+                        labels.extend([f"Week {wk} · {d}" for d in selected_days])
+                st.session_state["smart_training_plan"]={
+                    "horizon":horizon,"gym":gym,"weight":weight,"goal":goal,"focus":focus,"mins":mins,
+                    "level":level,"days_per_week":days_per_week,"days":selected_days,"labels":labels,
+                    "plan":plan,"limitations":limitations
+                }
 
         plan=st.session_state.get("smart_training_plan")
         if plan:
@@ -2772,7 +2690,7 @@ def trainer():
             if plan["limitations"]:
                 st.caption(f"Your note: {plan['limitations']}. Adjust/skip anything that causes pain.")
             for i,dayplan in enumerate(plan["plan"],1):
-                label="Today" if len(plan["plan"])==1 else f"Workout {i}"
+                label=plan.get("labels",[f"Workout {i}" for i in range(1,len(plan["plan"])+1)])[i-1]
                 with st.expander(label,expanded=(i==1)):
                     st.write("Warm-up: 3–5 minutes easy movement.")
                     for j,e in enumerate(dayplan,1):
@@ -2789,7 +2707,8 @@ def trainer():
             st.info("Build a plan first. Your first workout will show here.")
         else:
             dayplan=plan["plan"][0]
-            st.subheader(f"Today's {plan['gym']} Workout")
+            first_label=plan.get("labels",["Today"])[0]
+            st.subheader(f"{first_label} · {plan['gym']} Workout")
             for j,e in enumerate(dayplan,1):
                 st.markdown(f"### {j}. {e['name']}")
                 st.caption(e["cue"])
