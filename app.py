@@ -11,7 +11,7 @@ DB_PATH = APP_DIR / 'chaplife.db'
 
 st.set_page_config(page_title='ChapLife', page_icon='✨', layout='wide', initial_sidebar_state='collapsed')
 
-BUILD_VERSION='ChapLife Cloud v6.1.3'
+BUILD_VERSION='ChapLife Cloud v6.3'
 
 st.markdown('''
 <style>
@@ -82,6 +82,13 @@ def init_db():
         provider TEXT PRIMARY KEY,
         balance_limit REAL DEFAULT 0,
         paycheck_limit REAL DEFAULT 0
+    );
+    CREATE TABLE IF NOT EXISTS finance_migration_state (
+        id INTEGER PRIMARY KEY CHECK (id=1),
+        migrated INTEGER DEFAULT 0,
+        migrated_at TEXT,
+        source_name TEXT,
+        note TEXT
     );
     CREATE TABLE IF NOT EXISTS paycheck_plan_items (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1022,6 +1029,104 @@ def _safe_paycheck_label(p):
     amt=float(p["actual"] or p["expected"] or 0)
     return f"{p['pay_date']} · {money(amt)}"
 
+
+FINANCE_BACKUP_TABLES=[
+    "paychecks","finance_transactions","bills","savings_goals","savings_contributions",
+    "debts","roommate_payments","roommate_allocations","roommate_ledger",
+    "bill_plans","bill_funding","bnpl_purchases","bnpl_installments",
+    "finance_limits","paycheck_plan_items","finance_migration_state"
+]
+
+def finance_backup_payload():
+    out={"format":"ChapLife Finance Backup","version":2,"created_at":datetime.now().isoformat(),"tables":{}}
+    for t in FINANCE_BACKUP_TABLES:
+        try: out["tables"][t]=rows(f"SELECT * FROM {t}")
+        except Exception: out["tables"][t]=[]
+    return out
+
+def restore_finance_backup(payload):
+    if payload.get("format")!="ChapLife Finance Backup":
+        raise ValueError("Not a ChapLife Finance backup.")
+    c=db()
+    try:
+        c.execute("BEGIN")
+        for t in reversed(FINANCE_BACKUP_TABLES):
+            try: c.execute(f"DELETE FROM {t}")
+            except Exception: pass
+        for t in FINANCE_BACKUP_TABLES:
+            for rec in payload.get("tables",{}).get(t,[]) or []:
+                if not rec: continue
+                cols=list(rec.keys())
+                c.execute(f"INSERT INTO {t} ({','.join(cols)}) VALUES ({','.join(['?']*len(cols))})",[rec[k] for k in cols])
+        c.commit()
+    except Exception:
+        c.rollback(); raise
+    finally: c.close()
+
+def finance_migration_done():
+    r=rows("SELECT migrated FROM finance_migration_state WHERE id=1")
+    return bool(r and r[0]["migrated"])
+
+def set_finance_migration_done(source_name=""):
+    execute("""INSERT INTO finance_migration_state(id,migrated,migrated_at,source_name,note)
+               VALUES(1,1,?,?,?)
+               ON CONFLICT(id) DO UPDATE SET migrated=1,migrated_at=excluded.migrated_at,source_name=excluded.source_name,note=excluded.note""",
+            (datetime.now().isoformat(),source_name,"One-time legacy budget migration completed."))
+
+def parse_budget_upload(uploaded):
+    raw=uploaded.getvalue()
+    name=uploaded.name.lower()
+    if name.endswith(".csv"):
+        sheets={"Sheet1":pd.read_csv(io.BytesIO(raw),header=None)}
+    elif name.endswith((".xlsx",".xls")):
+        book=pd.ExcelFile(io.BytesIO(raw))
+        sheets={s:pd.read_excel(io.BytesIO(raw),sheet_name=s,header=None) for s in book.sheet_names}
+    else:
+        raise ValueError("Upload the original Excel/CSV budget file for automatic migration.")
+    found={"paychecks":[],"plan_items":[]}
+    seen=set()
+    for sname,df in sheets.items():
+        vals=df.fillna("").astype(str)
+        for r in range(len(vals)):
+            row=[x.strip() for x in vals.iloc[r].tolist()]
+            joined=" | ".join(row)
+            m=re.search(r"pay\s*day\s*(\d{1,2}/\d{1,2})",joined,re.I)
+            moneyvals=re.findall(r"\$\s*([\d,]+(?:\.\d{1,2})?)",joined)
+            if m and moneyvals:
+                mm,dd=map(int,m.group(1).split("/"))
+                d=date(date.today().year,mm,dd).isoformat()
+                amt=float(moneyvals[0].replace(",",""))
+                key=(d,amt)
+                if key not in seen:
+                    found["paychecks"].append({"pay_date":d,"amount":amt,"sheet":sname,"row":r+1}); seen.add(key)
+            for cat,label in [("IRS","irs"),("Dues","dues"),("Randi / Protected","randi"),("Credit Card","chase"),("Credit Card","capital")]:
+                if re.search(rf"\b{label}\b",joined,re.I) and moneyvals:
+                    amt=float(moneyvals[0].replace(",",""))
+                    key=(cat,label,sname,r,amt)
+                    if key not in seen:
+                        found["plan_items"].append({"category":cat,"name":label.title(),"amount":amt,"sheet":sname,"row":r+1}); seen.add(key)
+    return found
+
+def import_budget_findings(found,source_name):
+    today=date.today()
+    parsed=[(date.fromisoformat(x["pay_date"]),x) for x in found.get("paychecks",[]) if x.get("pay_date")]
+    selected=sorted([x for x in parsed if x[0]<=today],key=lambda x:x[0],reverse=True)[:4] + sorted([x for x in parsed if x[0]>today],key=lambda x:x[0])
+    pid_by_date={}
+    for d,p in selected:
+        existing=rows("SELECT * FROM paychecks WHERE pay_date=?",(d.isoformat(),))
+        if existing: pid=existing[0]["id"]
+        else:
+            expected=float(p["amount"]); actual=expected if d<=today else 0.0
+            pid=execute("INSERT INTO paychecks(pay_date,expected,actual,note) VALUES(?,?,?,?)",(d.isoformat(),expected,actual,f"Migrated from {source_name}"))
+        pid_by_date[d.isoformat()]=pid
+    if pid_by_date:
+        active_pid=sorted([(abs((date.fromisoformat(k)-today).days),v) for k,v in pid_by_date.items()])[0][1]
+        for x in found.get("plan_items",[]):
+            execute("""INSERT INTO paycheck_plan_items(paycheck_id,category,name,planned_amount,actual_amount,status,protected,note)
+                       VALUES(?,?,?,?,?,?,?,?)""",(active_pid,x["category"],x["name"],float(x["amount"]),0.0,"Planned",1 if x["category"]=="Randi / Protected" else 0,f"Migrated from {source_name}"))
+    set_finance_migration_done(source_name)
+    return len(selected)
+
 def finances():
     st.title("💰 Finances")
     reassign_bnpl_installments()
@@ -1285,17 +1390,64 @@ def finances():
         if not goals.empty: st.dataframe(goals,use_container_width=True,hide_index=True)
         st.caption("Savings amounts planned from a specific paycheck can be added directly in Paycheck Command.")
 
-    # ---- IMPORT ----
+    # ---- ONE-TIME MIGRATION / BACKUP ----
     with tabs[6]:
-        st.subheader("📥 Budget Sheet / Paycheck Import")
-        st.info("Keep using the recent-paycheck rule: import the newest paycheck on or before today plus the 3 immediately before it. Future rows remain planning, not received income.")
-        st.caption("Your existing sheet-import workflow remains available in the prior build logic; this connected Finance system is ready to receive those paycheck dates.")
+        if finance_migration_done():
+            st.subheader("✅ Old Budget Migrated")
+            st.success("ChapLife is now your primary finance tracker. You do not need to keep updating the old spreadsheet.")
+        else:
+            st.subheader("📥 Move My Old Budget Into ChapLife")
+            st.markdown("### 📤 UPLOAD OLD BUDGET SHEET HERE")
+            st.info("This is a one-time migration. After you review the preview and import it, ChapLife becomes the main place you maintain your finances.")
+            st.write("Newest paycheck on or before today + the 3 before it are kept as history. Future paycheck dates stay Planned.")
+            st.caption("Google Sheets → File → Download → Microsoft Excel (.xlsx). Upload that downloaded file here. Nothing imports until you approve the preview.")
+            up=st.file_uploader("Choose your old Excel budget file",type=["xlsx","xls","csv"],key="legacy_budget_upload",help="Google Sheets: File → Download → Microsoft Excel (.xlsx)")
+            if up is not None:
+                try:
+                    st.session_state["migration_findings"]=parse_budget_upload(up)
+                    st.session_state["migration_source_name"]=up.name
+                except Exception as e:
+                    st.error(str(e))
+            found=st.session_state.get("migration_findings")
+            if found:
+                st.markdown("### 🔎 Migration Preview — nothing has been imported yet")
+                c=st.columns(2)
+                c[0].metric("Paychecks found",len(found.get("paychecks",[])))
+                c[1].metric("Plan items found",len(found.get("plan_items",[])))
+                if found.get("paychecks"): st.dataframe(pd.DataFrame(found["paychecks"]),use_container_width=True,hide_index=True)
+                if found.get("plan_items"): st.dataframe(pd.DataFrame(found["plan_items"]),use_container_width=True,hide_index=True)
+                ok=st.checkbox("I reviewed the preview and want to import these records.",key="migration_confirm")
+                if st.button("🚚 Import & Retire Old Budget",type="primary",use_container_width=True,disabled=not ok):
+                    n=import_budget_findings(found,st.session_state.get("migration_source_name","Old budget"))
+                    st.session_state.pop("migration_findings",None)
+                    st.success(f"Migration complete. {n} paycheck record(s) imported under the recent-paycheck rule.")
+                    st.rerun()
+
+        st.divider()
+        st.subheader("🛟 Finance Backup & Restore")
+        backup=json.dumps(finance_backup_payload(),indent=2,default=str).encode("utf-8")
+        st.download_button("⬇️ Download Finance Backup",data=backup,file_name=f"ChapLife_Finance_Backup_{date.today().isoformat()}.json",mime="application/json",use_container_width=True)
+        restore=st.file_uploader("Restore a ChapLife Finance backup",type=["json"],key="finance_restore")
+        if restore is not None:
+            st.warning("Restore replaces the current Finance records with the backup.")
+            if st.checkbox("I understand and want to restore this backup.",key="restore_confirm"):
+                if st.button("♻️ Restore Finance Backup",use_container_width=True):
+                    restore_finance_backup(json.loads(restore.getvalue().decode("utf-8"))); st.rerun()
 
     # ---- MONEY SETTINGS ----
     with tabs[7]:
         st.subheader("⚙️ Money Settings")
         st.write("Affirm/Klarna limits live in the BNPL tab. Paycheck allocations, debt, held money and transactions all use the same finance database.")
         st.caption("Personal limits are your own guardrails; they do not change the limit shown by Affirm or Klarna.")
+        st.divider()
+        st.markdown("#### Old budget migration")
+        if finance_migration_done():
+            st.success("Old budget is marked migrated / retired.")
+            if st.button("Allow budget upload again",use_container_width=True,key="reopen_budget_migration"):
+                execute("DELETE FROM finance_migration_state WHERE id=1")
+                st.rerun()
+        else:
+            st.caption("Old budget has not been migrated yet.")
 
 
 
