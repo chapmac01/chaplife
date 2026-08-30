@@ -11,7 +11,7 @@ DB_PATH = APP_DIR / 'chaplife.db'
 
 st.set_page_config(page_title='ChapLife', page_icon='✨', layout='wide', initial_sidebar_state='collapsed')
 
-BUILD_VERSION='ChapLife Cloud v6.9 · Paycheck Flow + Real Trainer'
+BUILD_VERSION='ChapLife Cloud v6.9.1 · Home Fix'
 
 st.markdown('''
 <style>
@@ -827,6 +827,13 @@ def home():
 
     st.subheader('My dashboard')
     insights=_dashboard_insights()
+    # Every dashboard card must have three safe preview lines.
+    # AI Reflection Coach is private conversation history, so Home never previews message content.
+    insights.setdefault("AI Reflection Coach",[
+        "Private reflection conversations",
+        "Honest feedback without automatic agreement",
+        "Open when you want to talk something through"
+    ])
     grid=[
         ('💰','Finances'),('🥗','Food & Nutrition'),('🛒','Grocery Shopping'),
         ('🏋🏾‍♀️','My Trainer'),('🪞','AI Reflection Coach'),('💧','Water & Jug Puzzles'),('📖','Vocabulary'),
