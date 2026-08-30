@@ -21,7 +21,7 @@ def current_db_path():
 
 st.set_page_config(page_title='ChapLife', page_icon='✨', layout='wide', initial_sidebar_state='collapsed')
 
-BUILD_VERSION='ChapLife 7.2 · Trips + Shared Planning'
+BUILD_VERSION='ChapLife 7.2.1 · Simple Access Flow Fix'
 
 st.markdown('''
 <style>
@@ -797,7 +797,7 @@ def owner_user_management():
 
     # Pre-approved names
     st.subheader("Pre-Approved People")
-    st.caption("Add someone here before they join and they will get instant approval when their name matches.")
+    st.caption("Add someone here before they join. They can use the shared access code and go straight to creating their password.")
     with st.form("preapprove_person",clear_on_submit=True):
         name=st.text_input("Full name")
         if st.form_submit_button("Add Pre-Approved Person",use_container_width=True):
@@ -859,7 +859,7 @@ def owner_user_management():
                     "active":True,
                     "updated_at":datetime.now().isoformat(timespec="seconds")
                 })
-                st.success(f"{p.get('display_name')} can use the shared PIN again to create a new password.")
+                st.success(f"{p.get('display_name')} can use First time / Reset with the shared access code to create a new password.")
                 st.rerun()
 
             confirm_key=f"delete_confirm_{p['id']}"
@@ -1312,6 +1312,32 @@ def _central_members(filters="", select="*"):
     suffix=("&"+filters) if filters else ""
     return _admin_http_json(f"/rest/v1/chaplife_members?select={urllib.parse.quote(select,safe='*,()')}{suffix}")
 
+def _central_member_by_name_or_username(value):
+    key=str(value or "").strip()
+    norm=_norm_name(key)
+    if not key:
+        return None
+    # First use normalized full-name matching, which ignores capitalization,
+    # punctuation, and repeated spaces.
+    try:
+        data=_admin_http_json(
+            f"/rest/v1/chaplife_members?normalized_name=eq.{urllib.parse.quote(norm)}&select=*"
+        )
+        if data:
+            return data[0]
+    except Exception:
+        pass
+    # Then fall back to username matching.
+    try:
+        data=_admin_http_json(
+            f"/rest/v1/chaplife_members?username=ilike.{urllib.parse.quote(key)}&select=*"
+        )
+        if data:
+            return data[0]
+    except Exception:
+        pass
+    return None
+
 def _central_member_by_id(member_id):
     data=_admin_http_json(f"/rest/v1/chaplife_members?id=eq.{urllib.parse.quote(str(member_id))}&select=*")
     return data[0] if data else None
@@ -1478,137 +1504,135 @@ def cloud_logout():
         st.session_state.pop(k,None)
 
 def cloud_auth_gate():
-    # Existing owner session continues to use Supabase Auth.
     owner_session=st.session_state.get("_chaplife_cloud_session")
     member_id=st.session_state.get("_chaplife_member_id")
 
-    if not owner_session and not member_id:
+    # Existing owner cloud session remains valid, but there is no public owner-only login section.
+    if not owner_session and not member_id and not st.session_state.get("_finish_member_setup"):
         st.markdown(
             '<div class="chap-auth-shell"><div class="chap-auth-mark">✨</div>'
-            '<h1>ChapLife</h1><p>Your life, organized around you.</p></div>',
+            '<h1>ChapLife</h1><p>Private, personal, and built around your life.</p></div>',
             unsafe_allow_html=True
         )
 
-        signin_tab,join_tab=st.tabs(["Sign in","Use access PIN"])
+        if not MULTIUSER_CONFIGURED:
+            st.warning("ChapLife member access still needs the multi-user Supabase setup.")
+            st.stop()
 
-        with signin_tab:
-            if MULTIUSER_CONFIGURED:
-                with st.form("member_signin_form"):
-                    login=st.text_input("Username or name",placeholder="Your username or full name")
-                    password=st.text_input("Password",type="password")
-                    go=st.form_submit_button("Sign in",use_container_width=True)
-                    if go:
-                        key=login.strip()
-                        if not key or not password:
-                            st.warning("Enter your username/name and password.")
-                        else:
-                            q=urllib.parse.quote(key.lower())
-                            nq=urllib.parse.quote(_norm_name(key))
-                            data=_admin_http_json(
-                                f"/rest/v1/chaplife_members?or=(username.ilike.{q},normalized_name.eq.{nq})&select=*"
-                            )
-                            match=next((m for m in data if m.get("status")=="approved" and m.get("active",True)),None)
-                            if match and _member_password_ok(password,match.get("password_hash","")):
-                                st.session_state["_chaplife_member_id"]=match["id"]
-                                st.session_state["_chaplife_member_profile"]=match
-                                st.session_state["_cloud_loaded"]=False
-                                st.rerun()
-                            elif match:
-                                st.error("That password doesn't match.")
-                            else:
-                                st.error("No approved ChapLife account matched that sign-in.")
-            else:
-                st.info("Member access will be available after the multi-user Supabase setup is added.")
+        mode=st.segmented_control(
+            "Access",
+            ["Sign in","First time / Reset"],
+            default="Sign in",
+            key="chaplife_access_mode",
+            label_visibility="collapsed"
+        )
 
-        with join_tab:
-            if MULTIUSER_CONFIGURED:
-                with st.form("shared_pin_join"):
-                    pin=st.text_input("ChapLife access PIN",type="password")
-                    full_name=st.text_input("Your full name")
-                    continue_btn=st.form_submit_button("Continue",use_container_width=True)
-                    if continue_btn:
-                        expected=_shared_access_pin()
-                        if not expected:
-                            st.warning("The ChapLife owner hasn't set the shared access PIN yet.")
-                        elif not hmac.compare_digest(str(pin).strip(),expected):
-                            st.error("That access PIN isn't correct.")
-                        elif not full_name.strip():
-                            st.warning("Enter your name.")
+        if mode=="Sign in":
+            with st.form("simple_member_signin"):
+                login=st.text_input("Name or username",placeholder="Your full name or username")
+                password=st.text_input("Password",type="password")
+                go=st.form_submit_button("Enter ChapLife",use_container_width=True)
+                if go:
+                    person=_central_member_by_name_or_username(login)
+                    if not person:
+                        st.error("I couldn't find that ChapLife account.")
+                    elif person.get("status")=="pending":
+                        st.info("Your access request is still waiting for approval.")
+                    elif person.get("status")=="rejected":
+                        st.error("This access request was not approved.")
+                    elif not person.get("active",True):
+                        st.error("This account is currently disabled.")
+                    elif person.get("status") in ("preapproved",) or not person.get("password_hash"):
+                        st.info("Use **First time / Reset** above with the shared access code to create your password.")
+                    elif person.get("status")!="approved":
+                        st.error("This account is not ready to sign in yet.")
+                    elif not _member_password_ok(password,person.get("password_hash","")):
+                        st.error("That password doesn't match.")
+                    else:
+                        st.session_state["_chaplife_member_id"]=person["id"]
+                        st.session_state["_chaplife_member_profile"]=person
+                        st.session_state["_cloud_loaded"]=False
+                        st.rerun()
+
+        else:
+            with st.form("simple_first_access"):
+                code=st.text_input("ChapLife access code",type="password")
+                full_name=st.text_input("Your full name",placeholder="Use the name Chennel has for you")
+                go=st.form_submit_button("Continue",use_container_width=True)
+                if go:
+                    expected=_shared_access_pin()
+                    if not expected:
+                        st.warning("The ChapLife access code has not been set yet.")
+                    elif not hmac.compare_digest(str(code).strip(),str(expected).strip()):
+                        st.error("That ChapLife access code isn't correct.")
+                    elif not full_name.strip():
+                        st.warning("Enter your full name.")
+                    else:
+                        person=_central_member_by_name_or_username(full_name)
+
+                        if person and person.get("status")=="rejected":
+                            st.error("This access request was not approved.")
+                        elif person and not person.get("active",True) and person.get("status")!="preapproved":
+                            st.error("This account is currently disabled.")
+                        elif person and person.get("status")=="pending":
+                            st.info("You're already on the list and still waiting for approval.")
+                        elif person and person.get("status") in ("preapproved","approved"):
+                            # Pre-approved people and approved password-reset users go directly to password creation.
+                            if person.get("status")=="preapproved":
+                                updated=_central_update_member(person["id"],{
+                                    "status":"approved",
+                                    "active":True,
+                                    "approved_at":datetime.now().isoformat(timespec="seconds"),
+                                    "updated_at":datetime.now().isoformat(timespec="seconds")
+                                })
+                                person=updated[0] if updated else _central_member_by_id(person["id"])
+                            st.session_state["_finish_member_setup"]=person["id"]
+                            st.rerun()
                         else:
+                            # Unknown names may use the shared code to request access, but cannot enter until approved.
+                            now=datetime.now().isoformat(timespec="seconds")
                             norm=_norm_name(full_name)
-                            found=_admin_http_json(
-                                f"/rest/v1/chaplife_members?normalized_name=eq.{urllib.parse.quote(norm)}&select=*"
+                            _admin_http_json(
+                                "/rest/v1/chaplife_members","POST",
+                                {
+                                    "display_name":full_name.strip(),
+                                    "normalized_name":norm,
+                                    "status":"pending",
+                                    "role":"member",
+                                    "active":True,
+                                    "profile_visible":False,
+                                    "created_at":now,
+                                    "updated_at":now
+                                },
+                                {"Prefer":"return=minimal"}
                             )
-                            person=found[0] if found else None
-                            if person and person.get("status")=="rejected":
-                                st.error("This access request was not approved.")
-                            elif person and person.get("status")=="disabled":
-                                st.error("This account is currently disabled.")
-                            elif person and person.get("status") in ("preapproved","approved"):
-                                if person.get("status")=="preapproved":
-                                    updated=_central_update_member(person["id"],{
-                                        "status":"approved","active":True,
-                                        "approved_at":datetime.now().isoformat(timespec="seconds"),
-                                        "updated_at":datetime.now().isoformat(timespec="seconds")
-                                    })
-                                    person=(updated[0] if updated else _central_member_by_id(person["id"]))
-                                st.session_state["_finish_member_setup"]=person["id"]
-                                st.rerun()
-                            elif person and person.get("status")=="pending":
-                                st.info("Your request is still waiting for approval.")
-                            else:
-                                now=datetime.now().isoformat(timespec="seconds")
-                                created=_admin_http_json(
-                                    "/rest/v1/chaplife_members","POST",
-                                    {"display_name":full_name.strip(),"normalized_name":norm,"status":"pending",
-                                     "role":"member","active":True,"profile_visible":False,
-                                     "created_at":now,"updated_at":now},
-                                    {"Prefer":"return=representation"}
-                                )
-                                st.success("Request sent. Chennel can approve or reject it from ChapLife.")
-            else:
-                st.info("Member access will be available after the multi-user Supabase setup is added.")
+                            st.success("Your access request was sent to Chennel. Once approved, come back to **First time / Reset** to create your password.")
 
-        # Owner access is intentionally unobtrusive.
-        with st.expander("Owner sign in"):
-            if not CLOUD_CONFIGURED:
-                st.warning("Owner cloud sign-in is not configured.")
-            else:
-                with st.form("owner_cloud_signin"):
-                    email=st.text_input("Owner email")
-                    password=st.text_input("Owner password",type="password")
-                    submit=st.form_submit_button("Owner sign in",use_container_width=True)
-                    if submit:
-                        try:
-                            result=cloud_sign_in(email.strip(),password)
-                            if result.get("access_token"):
-                                st.session_state["_chaplife_cloud_session"]=result
-                                st.session_state["_cloud_loaded"]=False
-                                st.rerun()
-                            else:
-                                st.error("Sign-in did not return a session.")
-                        except Exception:
-                            st.error("Owner sign-in failed.")
         st.stop()
 
-    # A pre-approved or newly-approved member completes account setup once.
+    # Complete first-time access or a password reset.
     finish_id=st.session_state.get("_finish_member_setup")
     if finish_id and not owner_session and not member_id:
         person=_central_member_by_id(finish_id)
         if not person:
             st.session_state.pop("_finish_member_setup",None)
             st.rerun()
+
         st.markdown(
             '<div class="chap-auth-shell"><div class="chap-auth-mark">👋</div>'
             f'<h1>Welcome, {html.escape(person.get("display_name") or "friend")}</h1>'
-            '<p>Create your private ChapLife login.</p></div>',unsafe_allow_html=True
+            '<p>Create the password you will use from now on.</p></div>',
+            unsafe_allow_html=True
         )
         with st.form("finish_member_setup_form"):
-            username=st.text_input("Username (optional)",value=person.get("username") or "",
-                                   help="You can sign in with your full name if you don't want a username.")
+            username=st.text_input(
+                "Username (optional)",
+                value=person.get("username") or "",
+                help="You can always sign in with your full name instead."
+            )
             pw1=st.text_input("Create password",type="password")
             pw2=st.text_input("Confirm password",type="password")
-            done=st.form_submit_button("Create my ChapLife",use_container_width=True)
+            done=st.form_submit_button("Create My Password",use_container_width=True)
             if done:
                 if len(pw1)<8:
                     st.warning("Use at least 8 characters.")
@@ -1618,17 +1642,21 @@ def cloud_auth_gate():
                     uname=username.strip().lower() or None
                     if uname:
                         existing=_admin_http_json(
-                            f"/rest/v1/chaplife_members?username=eq.{urllib.parse.quote(uname)}&id=neq.{urllib.parse.quote(str(finish_id))}&select=id"
+                            f"/rest/v1/chaplife_members?username=ilike.{urllib.parse.quote(uname)}&id=neq.{urllib.parse.quote(str(finish_id))}&select=id"
                         )
                         if existing:
                             st.error("That username is already being used.")
                             st.stop()
-                    updated=_central_update_member(finish_id,{
-                        "username":uname,
-                        "password_hash":_member_password_hash(pw1),
-                        "status":"approved","active":True,
-                        "updated_at":datetime.now().isoformat(timespec="seconds")
-                    })
+                    updated=_central_update_member(
+                        finish_id,
+                        {
+                            "username":uname,
+                            "password_hash":_member_password_hash(pw1),
+                            "status":"approved",
+                            "active":True,
+                            "updated_at":datetime.now().isoformat(timespec="seconds")
+                        }
+                    )
                     person=updated[0] if updated else _central_member_by_id(finish_id)
                     st.session_state.pop("_finish_member_setup",None)
                     st.session_state["_chaplife_member_id"]=finish_id
@@ -1642,18 +1670,20 @@ def cloud_auth_gate():
         try:
             found=cloud_pull_db()
             if not found:
-                # Important: a new friend gets a brand-new empty DB, never the owner's DB.
                 path=current_db_path()
                 if member_id and path.exists():
-                    try: path.unlink()
-                    except Exception: pass
+                    try:
+                        path.unlink()
+                    except Exception:
+                        pass
                 init_db()
                 cloud_push_db()
             st.session_state["_cloud_loaded"]=True
         except Exception:
             st.error("ChapLife could not load your private data.")
             if st.button("Sign out"):
-                cloud_logout(); st.rerun()
+                cloud_logout()
+                st.rerun()
             st.stop()
 
 cloud_auth_gate()
