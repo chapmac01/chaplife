@@ -11,7 +11,7 @@ DB_PATH = APP_DIR / 'chaplife.db'
 
 st.set_page_config(page_title='ChapLife', page_icon='✨', layout='wide', initial_sidebar_state='collapsed')
 
-BUILD_VERSION='ChapLife Cloud v6.6 · Editable Finance Corrections'
+BUILD_VERSION='ChapLife Cloud v6.8 · AI Coach + Smart Trainer'
 
 st.markdown('''
 <style>
@@ -128,6 +128,29 @@ def init_db():
     CREATE TABLE IF NOT EXISTS chaplife_seed_state (
         seed_key TEXT PRIMARY KEY,
         applied_at TEXT,
+        note TEXT
+    );
+    CREATE TABLE IF NOT EXISTS weight_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        log_date TEXT NOT NULL,
+        weight REAL NOT NULL,
+        note TEXT
+    );
+    CREATE TABLE IF NOT EXISTS reflection_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        log_date TEXT NOT NULL,
+        situation TEXT,
+        response TEXT,
+        source TEXT
+    );
+    CREATE TABLE IF NOT EXISTS recurring_due_dates (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        amount REAL DEFAULT 0,
+        due_day INTEGER NOT NULL,
+        category TEXT,
+        source_label TEXT,
+        active INTEGER DEFAULT 1,
         note TEXT
     );
     CREATE TABLE IF NOT EXISTS finance_migration_state (
@@ -438,7 +461,11 @@ if acct[1].button("↕ Sync now",use_container_width=True,key="manual_cloud_sync
 if acct[2].button("Sign out",use_container_width=True,key="cloud_signout"):
     cloud_logout(); st.rerun()
 if st.session_state.get("_cloud_sync_error"):
-    st.warning("Cloud sync warning: "+st.session_state.pop("_cloud_sync_error"))
+    _sync_msg=str(st.session_state.pop("_cloud_sync_error"))
+    if "jwt expired" in _sync_msg.lower() or "expired" in _sync_msg.lower() and "jwt" in _sync_msg.lower():
+        st.info("☁️ Your cloud session expired. Your app can still open, but cloud sync is paused until you sign out and sign back in.")
+    else:
+        st.warning("Cloud sync needs attention. Your local app data is still available.")
 
 
 # ---------- Google Calendar OAuth ----------
@@ -647,7 +674,7 @@ def goto(p): st.session_state.page=p
 
 pages = {
  'Home':'🏠', 'Finances':'💰', 'Food & Nutrition':'🥗', 'Grocery Shopping':'🛒', 'My Trainer':'🏋🏾‍♀️',
- 'Water & Jug Puzzles':'💧', 'Vocabulary':'📖', 'Health & Life':'❤️', 'Career Simulator':'🏗️',
+ 'AI Reflection Coach':'🪞', 'Water & Jug Puzzles':'💧', 'Vocabulary':'📖', 'Health & Life':'❤️', 'Career Simulator':'🏗️',
  'My Progress':'📈', 'Settings':'⚙️'
 }
 
@@ -789,7 +816,7 @@ def home():
     insights=_dashboard_insights()
     grid=[
         ('💰','Finances'),('🥗','Food & Nutrition'),('🛒','Grocery Shopping'),
-        ('🏋🏾‍♀️','My Trainer'),('💧','Water & Jug Puzzles'),('📖','Vocabulary'),
+        ('🏋🏾‍♀️','My Trainer'),('🪞','AI Reflection Coach'),('💧','Water & Jug Puzzles'),('📖','Vocabulary'),
         ('🏗️','Career Simulator'),('❤️','Health & Life')
     ]
     if bool(get_setting('show_growth_section',False)):
@@ -1074,14 +1101,14 @@ def paycheck_connected_summary(paycheck_id):
 
 def _safe_paycheck_label(p):
     amt=float(p["actual"] or p["expected"] or 0)
-    return f"{p['pay_date']} · {money(amt)}"
+    return f"{us_date(p['pay_date'])} · {money(amt)}"
 
 
 FINANCE_BACKUP_TABLES=[
     "paychecks","finance_transactions","bills","savings_goals","savings_contributions",
     "debts","roommate_payments","roommate_allocations","roommate_ledger",
     "bill_plans","bill_funding","bnpl_purchases","bnpl_installments",
-    "finance_limits","paycheck_plan_items","finance_migration_state"
+    "finance_limits","paycheck_plan_items","recurring_due_dates","finance_migration_state"
 ]
 
 def finance_backup_payload():
@@ -1314,9 +1341,66 @@ def preload_uploaded_budget_once():
             (seed_key,datetime.now().isoformat(),"Preloaded from user-uploaded Budget sheet.xlsx"))
     reassign_bnpl_installments()
 
+
+def next_monthly_due(due_day, base=None):
+    base=base or date.today()
+    y,m=base.year,base.month
+    import calendar
+    day=min(int(due_day),calendar.monthrange(y,m)[1])
+    candidate=date(y,m,day)
+    if candidate < base:
+        if m==12: y,m=y+1,1
+        else: m+=1
+        day=min(int(due_day),calendar.monthrange(y,m)[1])
+        candidate=date(y,m,day)
+    return candidate
+
+def seed_recurring_due_dates_once():
+    key="recurring_due_dates_from_sept4_v1"
+    if rows("SELECT seed_key FROM chaplife_seed_state WHERE seed_key=?",(key,)):
+        return
+    # Derived from labels in Sept 4 column A. The month in the old label is preserved
+    # as source context; the recurring tracker uses the day-of-month.
+    seed=[
+        ("Rent",900.00,1,"Housing","Rent 1/1"),
+        ("Sundance Vacations",121.64,1,"Travel","Sundance Vacations 1/1"),
+        ("Rocket",7.62,2,"Subscription","Rocket 12/2"),
+        ("Patreon",15.75,2,"Subscription","Pateron 12/2"),
+        ("Prime Video",8.99,2,"Subscription","Prime video 12/2"),
+        ("T-Mobile",57.10,6,"Phone","T-mobile 1/6"),
+        ("Blooket",9.99,7,"Subscription","Blooket 1/7"),
+        ("Spotify",11.99,10,"Subscription","spotify 11/10"),
+        ("Chase",188.831839,10,"Debt","Chase 1/10"),
+        ("Verizon",56.10,10,"Phone","Verizon 1/10"),
+        ("Max",16.99,10,"Subscription","Max 11/10"),
+        ("ChatGPT",21.78,12,"Subscription","Chat GPT 12/12"),
+        ("BET Plus",10.99,13,"Subscription","Bet Plus 12/13"),
+        ("Capital 1",70.00,13,"Debt","Capital 1 1/13"),
+        ("Cricut",10.88,16,"Subscription","Cricut 11/16"),
+        ("Amazon Prime",16.32,16,"Subscription","Amazom prime 11/16"),
+        ("Con-Ed",318.83,17,"Utilities","Con-Ed 1/17"),
+        ("Paramount App",12.99,18,"Subscription","Paramount App 11/18"),
+        ("Disney Plus",20.00,19,"Subscription","Disney Plus 11/19"),
+        ("Adobe",37.55,22,"Subscription","Adobe 11/22"),
+        ("Patreon",4.50,22,"Subscription","Pateron 11/22"),
+        ("Samsung",10.99,25,"Subscription","Samsung 11/25"),
+        ("Google One",2.17,27,"Subscription","google one 11/27"),
+        ("State Farm",171.30,28,"Insurance","State Farm 1/28"),
+        ("Peacock",7.99,29,"Subscription","Peacock 11/29"),
+        ("National Grid",82.50,30,"Utilities","National Grid 1/30"),
+    ]
+    for name,amount,due_day,category,label in seed:
+        if not rows("SELECT id FROM recurring_due_dates WHERE lower(name)=lower(?) AND due_day=?",(name,due_day)):
+            execute("""INSERT INTO recurring_due_dates(name,amount,due_day,category,source_label,active,note)
+                       VALUES(?,?,?,?,?,1,?)""",
+                    (name,float(amount),int(due_day),category,label,"Seeded from old budget sheet column A"))
+    execute("INSERT OR REPLACE INTO chaplife_seed_state(seed_key,applied_at,note) VALUES(?,?,?)",
+            (key,datetime.now().isoformat(),"Recurring bill due days seeded from Sept 4 column A."))
+
 def finances():
     st.title("💰 Finances")
     preload_uploaded_budget_once()
+    seed_recurring_due_dates_once()
     reassign_bnpl_installments()
     st.caption("✓ Your old Budget sheet is preloaded into ChapLife · Dates display MM/DD/YYYY · Times display with AM/PM")
     tabs=st.tabs([
@@ -1333,7 +1417,7 @@ def finances():
             st.markdown("### ➕ Add Paycheck")
             with st.form("first_paycheck_form",clear_on_submit=True):
                 c=st.columns(2)
-                pdte=c[0].date_input("Pay date",value=date.today(),key="first_pay_date")
+                pdte=c[0].date_input("Pay date",value=date.today(),format="MM/DD/YYYY",key="first_pay_date")
                 exp=c[1].number_input("Expected take-home",min_value=0.0,value=0.0,step=25.0,key="first_pay_expected")
                 c=st.columns(2)
                 act=c[0].number_input("Actual take-home",min_value=0.0,value=0.0,step=25.0,key="first_pay_actual",
@@ -1385,10 +1469,15 @@ def finances():
                                           FROM bnpl_installments i JOIN bnpl_purchases p ON p.id=i.purchase_id
                                           WHERE i.paycheck_id=? AND i.status!='Paid' ORDER BY i.due_date""",(pid,))]
                 if unpaid:
-                    opts={f"{x['provider']} · {x['merchant']} · {x['due_date']} · {money(x['amount'])}":x for x in unpaid}
-                    choice=st.selectbox("Mark an installment paid",["Select..."]+list(opts.keys()),key="mark_bnpl_paid")
-                    if choice!="Select..." and st.button("✓ Mark selected installment paid",use_container_width=True,key="mark_bnpl_paid_btn"):
+                    opts={f"{x['provider']} · {x['merchant']} · {us_date(x['due_date'])} · {money(x['amount'])}":x for x in unpaid}
+                    choice=st.selectbox("Select a planned BNPL installment",["Select..."]+list(opts.keys()),key="mark_bnpl_paid")
+                    c=st.columns(2)
+                    if choice!="Select..." and c[0].button("✓ Mark Paid",use_container_width=True,key="mark_bnpl_paid_btn"):
                         mark_bnpl_installment_paid(opts[choice]["id"])
+                        st.rerun()
+                    if choice!="Select..." and c[1].button("🗑️ Remove From This Plan",use_container_width=True,key="remove_bnpl_plan_btn"):
+                        execute("UPDATE bnpl_installments SET paycheck_id=NULL,status='Removed from plan' WHERE id=?",(opts[choice]["id"],))
+                        st.success("That BNPL installment was removed from this paycheck plan. The purchase itself was not deleted.")
                         st.rerun()
 
             st.markdown("### 📋 Everything else planned from this paycheck")
@@ -1420,7 +1509,7 @@ def finances():
             st.markdown("### ➕ Add Another Paycheck")
             with st.form("quick_add_paycheck",clear_on_submit=True):
                 c=st.columns(4)
-                pdte=c[0].date_input("Pay date",value=date.today(),key="quick_pay_date")
+                pdte=c[0].date_input("Pay date",value=date.today(),format="MM/DD/YYYY",key="quick_pay_date")
                 exp=c[1].number_input("Expected take-home",min_value=0.0,value=0.0,step=25.0,key="quick_pay_expected")
                 act=c[2].number_input("Actual take-home",min_value=0.0,value=0.0,step=25.0,key="quick_pay_actual",help="Leave at $0 until the paycheck actually arrives.")
                 note=c[3].text_input("Note",key="quick_pay_note")
@@ -1472,6 +1561,18 @@ def finances():
                                ON CONFLICT(provider) DO UPDATE SET balance_limit=excluded.balance_limit,paycheck_limit=excluded.paycheck_limit""",
                             (provider,newbl,newpl)); st.rerun()
 
+        removed=rows("""SELECT i.id,i.due_date,i.amount,p.provider,p.merchant
+                        FROM bnpl_installments i JOIN bnpl_purchases p ON p.id=i.purchase_id
+                        WHERE i.status='Removed from plan' ORDER BY i.due_date""")
+        if removed:
+            with st.expander("↩️ BNPL removed from paycheck plans"):
+                ropts={f"{x['provider']} · {x['merchant']} · {us_date(x['due_date'])} · {money(x['amount'])}":x for x in removed}
+                rchoice=st.selectbox("Restore an installment",["Select..."]+list(ropts.keys()),key="restore_bnpl_choice")
+                if rchoice!="Select..." and st.button("Restore to automatic planning",use_container_width=True):
+                    execute("UPDATE bnpl_installments SET status='Planned' WHERE id=?",(ropts[rchoice]["id"],))
+                    reassign_bnpl_installments()
+                    st.rerun()
+
         st.markdown("### ➕ Quick Add Purchase")
         with st.form("quick_bnpl_purchase",clear_on_submit=True):
             c=st.columns(3)
@@ -1479,10 +1580,10 @@ def finances():
             merchant=c[1].text_input("Store / purchase",placeholder="Amazon, SHEIN, JetBlue...")
             total=c[2].number_input("Purchase total",min_value=0.0,step=5.0)
             c=st.columns(4)
-            purchase_date=c[0].date_input("Purchase date",date.today())
+            purchase_date=c[0].date_input("Purchase date",date.today(),format="MM/DD/YYYY")
             frequency=c[1].selectbox("Payments",["Every 2 weeks","Monthly","Weekly"])
             count=c[2].number_input("# of payments",min_value=1,max_value=36,value=4,step=1)
-            first_date=c[3].date_input("First payment date",date.today())
+            first_date=c[3].date_input("First payment date",date.today(),format="MM/DD/YYYY")
             c=st.columns(2)
             first_amount=c[0].number_input("First payment amount (0 = split evenly)",min_value=0.0,step=5.0)
             note=c[1].text_input("Note")
@@ -1627,10 +1728,37 @@ def finances():
         c[1].metric("Temporarily used / owe back",money(owed))
         c[2].metric("Physically available",money(physical))
         st.info("Held money stays protected from ChapLife's ordinary 'available to spend' thinking.")
+
+        st.markdown("### 💸 Borrowed From Randi")
+        st.caption("Use this when you temporarily use money from Randi's held money. It increases what you owe back and lowers the physically available protected money.")
+        with st.form("randi_borrow_connected",clear_on_submit=True):
+            c=st.columns(3)
+            bd=c[0].date_input("Date borrowed",date.today(),format="MM/DD/YYYY",key="randi_borrow_date")
+            ba=c[1].number_input("Amount borrowed",min_value=0.0,step=10.0,key="randi_borrow_amt")
+            bn=c[2].text_input("What was it for?",key="randi_borrow_note")
+            if st.form_submit_button("Record Money Borrowed",use_container_width=True):
+                if ba>0:
+                    execute("INSERT INTO roommate_ledger(tx_date,action,amount,note) VALUES(?,?,?,?)",
+                            (bd.isoformat(),"Temporary Use",float(ba),bn))
+                    st.success(f"Recorded {money(ba)} borrowed from Randi's held money.")
+                    st.rerun()
+
+        with st.form("randi_repay_connected",clear_on_submit=True):
+            c=st.columns(3)
+            rd=c[0].date_input("Date paid back",date.today(),format="MM/DD/YYYY",key="randi_repay_date")
+            ra=c[1].number_input("Amount paid back",min_value=0.0,step=10.0,key="randi_repay_amt")
+            rn=c[2].text_input("Repayment note",key="randi_repay_note")
+            if st.form_submit_button("Record Money Paid Back",use_container_width=True):
+                if ra>0:
+                    execute("INSERT INTO roommate_ledger(tx_date,action,amount,note) VALUES(?,?,?,?)",
+                            (rd.isoformat(),"Payback",float(ra),rn))
+                    st.success(f"Recorded {money(ra)} paid back to Randi.")
+                    st.rerun()
+
         # Keep existing shared household entry workflow from existing tables.
         with st.form("roommate_receive_connected",clear_on_submit=True):
             c=st.columns(3)
-            d=c[0].date_input("Received",date.today(),key="shared_recv_date")
+            d=c[0].date_input("Received",date.today(),format="MM/DD/YYYY",key="shared_recv_date")
             amt=c[1].number_input("Amount received",min_value=0.0,step=25.0,key="shared_recv_amt")
             note=c[2].text_input("Note",placeholder="Rent / bills / hold",key="shared_recv_note")
             if st.form_submit_button("Record shared money"):
@@ -1643,9 +1771,59 @@ def finances():
     # ---- BILLS / SPENDING ----
     with tabs[4]:
         st.subheader("📋 Bills & Spending")
+
+        st.markdown("### 📅 What's Coming Up")
+        due_rows=rows("SELECT * FROM recurring_due_dates WHERE active=1 ORDER BY due_day,name")
+        if due_rows:
+            upcoming=[]
+            for x in due_rows:
+                nd=next_monthly_due(x["due_day"])
+                upcoming.append({
+                    "Next Due":us_date(nd),
+                    "Bill":x["name"],
+                    "Amount":money(float(x["amount"] or 0)),
+                    "Due Day":int(x["due_day"]),
+                    "Category":x["category"] or "",
+                    "Old Sheet Label":x["source_label"] or ""
+                })
+            upcoming=sorted(upcoming,key=lambda x:datetime.strptime(x["Next Due"],"%m/%d/%Y"))[:12]
+            st.dataframe(pd.DataFrame(upcoming),use_container_width=True,hide_index=True)
+            st.caption("The old sheet labels like “Rocket 12/2” are now tracked as a recurring bill due on the 2nd of each month.")
+
+        with st.expander("✏️ Edit recurring due dates / amounts"):
+            all_due=rows("SELECT * FROM recurring_due_dates ORDER BY due_day,name")
+            if all_due:
+                choices={f"{x['name']} · day {x['due_day']}":x for x in all_due}
+                chosen=st.selectbox("Bill to edit",list(choices.keys()),key="edit_due_bill")
+                x=choices[chosen]
+                c=st.columns(3)
+                eday=c[0].number_input("Due day",min_value=1,max_value=31,value=int(x["due_day"]),step=1,key=f"due_day_{x['id']}")
+                eamt=c[1].number_input("Amount",min_value=0.0,value=float(x["amount"] or 0),step=1.0,key=f"due_amt_{x['id']}")
+                active=c[2].checkbox("Active",value=bool(x["active"]),key=f"due_active_{x['id']}")
+                if st.button("💾 Save Due-Date Changes",key=f"save_due_{x['id']}",use_container_width=True):
+                    execute("UPDATE recurring_due_dates SET due_day=?,amount=?,active=? WHERE id=?",
+                            (int(eday),float(eamt),1 if active else 0,int(x["id"])))
+                    st.success("Due-date information saved.")
+                    st.rerun()
+
+        with st.expander("➕ Add another recurring bill"):
+            with st.form("add_recurring_bill",clear_on_submit=True):
+                c=st.columns(4)
+                rn=c[0].text_input("Bill name")
+                ra=c[1].number_input("Amount",min_value=0.0,step=1.0)
+                rd=c[2].number_input("Due day",min_value=1,max_value=31,value=1,step=1)
+                rc=c[3].selectbox("Category",["Housing","Utilities","Insurance","Debt","Subscription","Phone","Travel","Other"])
+                if st.form_submit_button("Save Recurring Bill",use_container_width=True):
+                    if rn.strip():
+                        execute("""INSERT INTO recurring_due_dates(name,amount,due_day,category,source_label,active,note)
+                                   VALUES(?,?,?,?,?,1,?)""",
+                                (rn.strip(),float(ra),int(rd),rc,"Manual","Added in ChapLife"))
+                        st.rerun()
+
+        st.divider()
         with st.form("connected_tx",clear_on_submit=True):
             c=st.columns(4)
-            d=c[0].date_input("Date",date.today(),key="connected_txdate")
+            d=c[0].date_input("Date",date.today(),format="MM/DD/YYYY",key="connected_txdate")
             typ=c[1].selectbox("Type",["Expense","Income","Transfer"],key="connected_txtype")
             cat=c[2].selectbox("Category",["Housing","Utilities","Food","Groceries","Transportation","Debt","Savings","Personal","Entertainment","Medical","Gifts","Subscription","Travel","Other"],key="connected_txcat")
             merchant=c[3].text_input("Merchant / description",key="connected_txmerchant")
@@ -1744,7 +1922,7 @@ def _finances_legacy():
 
     with tabs[1]:
         with st.form('add_paycheck',clear_on_submit=True):
-            c=st.columns(4); d=c[0].date_input('Pay date',date.today()); expected=c[1].number_input('Expected pay',min_value=0.0,step=50.0); actual=c[2].number_input('Actual pay',min_value=0.0,step=50.0); note=c[3].text_input('Note')
+            c=st.columns(4); d=c[0].date_input('Pay date',date.today(),format='MM/DD/YYYY'); expected=c[1].number_input('Expected pay',min_value=0.0,step=50.0); actual=c[2].number_input('Actual pay',min_value=0.0,step=50.0); note=c[3].text_input('Note')
             if st.form_submit_button('Save paycheck',use_container_width=True):
                 execute('INSERT INTO paychecks(pay_date,expected,actual,note) VALUES(?,?,?,?)',(d.isoformat(),expected,actual,note)); amt=actual or expected
                 execute('INSERT INTO finance_transactions(tx_date,amount,tx_type,category,subcategory,need_want,merchant,note) VALUES(?,?,?,?,?,?,?,?)',(d.isoformat(),amt,'Income','Paycheck','Regular','Income','Paycheck',note)); st.rerun()
@@ -1754,7 +1932,7 @@ def _finances_legacy():
 
     with tabs[2]:
         with st.form('add_tx',clear_on_submit=True):
-            c=st.columns(4); d=c[0].date_input('Date',date.today(),key='txdate'); typ=c[1].selectbox('Type',['Expense','Income','Transfer']); cat=c[2].selectbox('Category',['Housing','Utilities','Food','Groceries','Transportation','Debt','Savings','Personal','Entertainment','Medical','Gifts','Subscription','Travel','Other']); detail=c[3].text_input('Other category / detail')
+            c=st.columns(4); d=c[0].date_input('Date',date.today(),format='MM/DD/YYYY',key='txdate'); typ=c[1].selectbox('Type',['Expense','Income','Transfer']); cat=c[2].selectbox('Category',['Housing','Utilities','Food','Groceries','Transportation','Debt','Savings','Personal','Entertainment','Medical','Gifts','Subscription','Travel','Other']); detail=c[3].text_input('Other category / detail')
             c=st.columns(4); amt=c[0].number_input('Amount',min_value=0.0,step=1.0); nw=c[1].selectbox('Classification',['Need','Want','Savings','Debt','Transfer','Income','Other']); merchant=c[2].text_input('Merchant / source'); note=c[3].text_input('Note')
             if st.form_submit_button('Save transaction',use_container_width=True):
                 execute('INSERT INTO finance_transactions(tx_date,amount,tx_type,category,subcategory,need_want,merchant,note) VALUES(?,?,?,?,?,?,?,?)',(d.isoformat(),amt,typ,cat,detail,nw,merchant,note)); st.rerun()
@@ -1772,7 +1950,7 @@ def _finances_legacy():
         c=st.columns(3); c[0].metric('Her held balance',money(held)); c[1].metric('I need to replace',money(owed)); c[2].metric('Held money currently available',money(physical))
 
         with st.form('roommate_payment',clear_on_submit=True):
-            c=st.columns(3); rd=c[0].date_input('Date received',date.today(),key='rmdate'); total=c[1].number_input('Total she gave me',min_value=0.0,step=10.0); pnote=c[2].text_input('Payment note',placeholder='Cash, Zelle, etc.')
+            c=st.columns(3); rd=c[0].date_input('Date received',date.today(),format='MM/DD/YYYY',key='rmdate'); total=c[1].number_input('Total she gave me',min_value=0.0,step=10.0); pnote=c[2].text_input('Payment note',placeholder='Cash, Zelle, etc.')
             st.markdown('**Allocate the payment**')
             allocs=[]
             for i in range(5):
@@ -1793,7 +1971,7 @@ def _finances_legacy():
 
         st.markdown('#### Her held-money ledger')
         action=st.selectbox('What happened?',['Used Temporarily','Replaced Money','Gave to Roommate / She Spent It'])
-        c=st.columns(3); ld=c[0].date_input('Date',date.today(),key='ledgerdate'); la=c[1].number_input('Amount',min_value=0.0,step=10.0,key='ledgeramt'); ln=c[2].text_input('Note',key='ledgernote')
+        c=st.columns(3); ld=c[0].date_input('Date',date.today(),format='MM/DD/YYYY',key='ledgerdate'); la=c[1].number_input('Amount',min_value=0.0,step=10.0,key='ledgeramt'); ln=c[2].text_input('Note',key='ledgernote')
         if st.button('Save held-money activity',use_container_width=True):
             if la>0: execute('INSERT INTO roommate_ledger(tx_date,action,amount,note) VALUES(?,?,?,?)',(ld.isoformat(),action,la,ln)); st.rerun()
 
@@ -1814,7 +1992,7 @@ def _finances_legacy():
         st.caption('Spread your share across one paycheck, halves, thirds, fourths, or your own custom amounts.')
         with st.form('bill_plan_form',clear_on_submit=True):
             c=st.columns(4); name=c[0].text_input('Bill / goal',placeholder='September Rent'); household=c[1].number_input('Whole household bill',min_value=0.0,step=50.0,value=2700.0); mine=c[2].number_input('My share',min_value=0.0,step=50.0,value=1800.0); roomie=c[3].number_input('Roommate share',min_value=0.0,step=50.0,value=900.0)
-            c=st.columns(4); due=c[0].date_input('Due date',date.today()+timedelta(days=30)); cat=c[1].selectbox('Category',['Rent / Housing','Utilities','Insurance','Debt','Subscription','Travel','Other']); method=c[2].selectbox('Fund my share',['Pay all from one paycheck','Split in half','Split into thirds','Split into fourths','Custom split']); note=c[3].text_input('Other / note')
+            c=st.columns(4); due=c[0].date_input('Due date',date.today()+timedelta(days=30),format='MM/DD/YYYY'); cat=c[1].selectbox('Category',['Rent / Housing','Utilities','Insurance','Debt','Subscription','Travel','Other']); method=c[2].selectbox('Fund my share',['Pay all from one paycheck','Split in half','Split into thirds','Split into fourths','Custom split']); note=c[3].text_input('Other / note')
             custom=''
             if method=='Custom split': custom=st.text_input('Custom paycheck amounts',placeholder='700, 700, 400')
             vals=split_amounts(mine,method,custom)
@@ -1854,7 +2032,7 @@ def _finances_legacy():
         st.subheader('Savings Planner'); st.caption('Create a goal and ChapLife calculates what you need to save by your deadline.')
         with st.form('goalform',clear_on_submit=True):
             c=st.columns(4); name=c[0].text_input('Goal name',placeholder='MLK Weekend 2027'); gtype=c[1].selectbox('Goal type',['Trip / Vacation','Emergency Fund','Car','Home','Event','Holiday','Major Purchase','Personal','Other']); target=c[2].number_input('Goal amount',min_value=1.0,step=50.0,value=3800.0); current=c[3].number_input('Already saved',min_value=0.0,step=25.0)
-            c=st.columns(4); tdate=c[0].date_input('Need it by',date.today()+timedelta(days=180)); priority=c[1].selectbox('Priority',['High','Medium','Low']); freq=c[2].selectbox('Contribution schedule',['Weekly','Biweekly','Twice Monthly','Monthly']); note=c[3].text_input('Other / note')
+            c=st.columns(4); tdate=c[0].date_input('Need it by',date.today()+timedelta(days=180),format='MM/DD/YYYY'); priority=c[1].selectbox('Priority',['High','Medium','Low']); freq=c[2].selectbox('Contribution schedule',['Weekly','Biweekly','Twice Monthly','Monthly']); note=c[3].text_input('Other / note')
             if st.form_submit_button('Create savings plan',use_container_width=True): execute('INSERT INTO savings_goals(name,goal_type,target_amount,current_amount,target_date,priority,contribution_frequency,note) VALUES(?,?,?,?,?,?,?,?)',(name,gtype,target,current,tdate.isoformat(),priority,freq,note)); st.rerun()
         for g in rows('SELECT * FROM savings_goals ORDER BY target_date'):
             target_date=datetime.strptime(g['target_date'],'%Y-%m-%d').date(); rem=max(0,g['target_amount']-g['current_amount']); n=payday_count(date.today(),target_date,g['contribution_frequency']); per=rem/n if n else rem; pct=min(1,g['current_amount']/g['target_amount']) if g['target_amount'] else 0
@@ -2383,29 +2561,280 @@ def grocery():
 
 # ---------- Trainer ----------
 EXERCISES={'Full Body':['Goblet squat','Dumbbell row','Romanian deadlift','Incline push-up','Shoulder press','Farmer carry'],'Lower Body':['Goblet squat','Romanian deadlift','Reverse lunge','Glute bridge','Calf raise'],'Upper Body':['Dumbbell row','Shoulder press','Chest press','Biceps curl','Triceps extension'],'Core':['Dead bug','Bird dog','Standing knee drive','Suitcase carry','Plank'],'Low Impact Cardio':['Elliptical','Brisk walk','Step touch','March in place']}
+
+# ---------- AI Reflection Coach ----------
+def _openai_reflection_reply(user_text):
+    key=_secret("OPENAI_API_KEY")
+    if not key:
+        return None
+    payload={
+        "model":"gpt-5.6-luna",
+        "input":[
+            {"role":"system","content":[{"type":"input_text","text":
+                "You are ChapLife's Honest Reflection Coach. You are not a therapist and must not diagnose. "
+                "Be warm but direct. Do not automatically agree with the user. Point out patterns, contradictions, "
+                "avoidance, assumptions, or boundary issues when supported by what they wrote. Ask at most one useful "
+                "question. Give practical next steps. Keep responses concise. If the user indicates imminent self-harm "
+                "or harm to others, prioritize immediate safety and emergency/crisis support."}]},
+            {"role":"user","content":[{"type":"input_text","text":user_text}]}
+        ],
+        "max_output_tokens":700
+    }
+    req=urllib.request.Request(
+        "https://api.openai.com/v1/responses",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Authorization":f"Bearer {key}","Content-Type":"application/json"},
+        method="POST"
+    )
+    try:
+        with urllib.request.urlopen(req,timeout=45) as r:
+            data=json.loads(r.read().decode("utf-8"))
+        # Responses API convenience field when present.
+        if isinstance(data.get("output_text"),str) and data["output_text"].strip():
+            return data["output_text"].strip()
+        chunks=[]
+        for item in data.get("output",[]) or []:
+            for c in item.get("content",[]) or []:
+                if c.get("type") in ("output_text","text") and c.get("text"):
+                    chunks.append(c["text"])
+        return "\n".join(chunks).strip() or None
+    except Exception:
+        return None
+
+def _local_reflection_reply(s):
+    low=s.lower()
+    if any(x in low for x in ["kill myself","suicide","hurt myself","end my life","hurt someone","kill someone"]):
+        return ("What you wrote sounds like it could involve immediate safety. I’m not the right tool for an emergency. "
+                "If you’re in the U.S., call or text 988 now; if there is immediate danger, call 911 or go to the nearest ER. "
+                "If you can, stay with someone you trust while you get help.")
+    assumptions=[]
+    if any(x in low for x in ["always","never","everyone","nobody"]):
+        assumptions.append("You’re using absolute language. Check whether the pattern is truly always/never, or whether the stronger truth is that it happens often enough to matter.")
+    if "but" in low and ("want" in low or "need" in low):
+        assumptions.append("There may be a gap between what you say you need and what you are accepting in practice.")
+    if any(x in low for x in ["should i text","should i call","should i say","what do i say"]):
+        assumptions.append("Before choosing the wording, decide what outcome you actually want and what boundary you will keep if the response is disappointing.")
+    if not assumptions:
+        assumptions.append("Separate the facts from the story you’re telling yourself about the facts. The facts deserve weight; the assumptions need evidence.")
+    return " ".join(assumptions)+"\n\nA useful next move: write the clearest fact, the feeling it caused, and the action you want to take—without trying to control the other person’s response."
+
+def reflection_coach():
+    st.title("🪞 Honest Reflection Coach")
+    st.caption("Direct, practical reflection—not a licensed therapist, diagnosis, or emergency service.")
+    st.info("This coach is meant to challenge your thinking when needed, not simply agree with you.")
+
+    prompt=st.text_area("What happened? Tell it like you would tell a friend.",height=180,
+                        placeholder="What happened, what was said/done, what you're thinking, and what you want to do...")
+    mode=st.radio("How do you want me to respond?",["Balanced","More direct","Gentle but honest"],horizontal=True)
+    if st.button("Talk it through",type="primary",use_container_width=True):
+        if not prompt.strip():
+            st.warning("Tell me what happened first.")
+        else:
+            wrapped=f"Response style: {mode}. Situation: {prompt.strip()}"
+            reply=_openai_reflection_reply(wrapped) or _local_reflection_reply(prompt.strip())
+            st.session_state["reflection_reply"]=reply
+            execute("INSERT INTO reflection_log(log_date,situation,response,source) VALUES(?,?,?,?)",
+                    (date.today().isoformat(),prompt.strip(),reply,"AI" if _secret("OPENAI_API_KEY") else "Local coach"))
+    if st.session_state.get("reflection_reply"):
+        st.markdown("### What I think")
+        st.write(st.session_state["reflection_reply"])
+
+    with st.expander("Recent reflections"):
+        hist=df_from("SELECT log_date,situation,response,source FROM reflection_log ORDER BY id DESC LIMIT 10")
+        if not hist.empty:
+            st.dataframe(display_df_us(hist),use_container_width=True,hide_index=True)
+
+# ---------- Smart Trainer ----------
+GYM_EQUIPMENT={
+    "Planet Fitness":["Bodyweight","Dumbbells","Smith machine","Cable machine","Selectorized machines","Leg press","Treadmill","Elliptical","Bike","Bench"],
+    "LA Fitness":["Bodyweight","Dumbbells","Barbell","Squat rack","Cable machine","Selectorized machines","Leg press","Treadmill","Elliptical","Bike","Bench"],
+    "Crunch Fitness":["Bodyweight","Dumbbells","Barbell","Squat rack","Smith machine","Cable machine","Selectorized machines","Leg press","Treadmill","Elliptical","Bike","Bench"],
+    "Home":["Bodyweight","Dumbbells","Kettlebell","Elliptical","Resistance band","Bench / chair"],
+    "No gym / Bodyweight":["Bodyweight"],
+    "Custom":[]
+}
+
+SMART_EXERCISES=[
+    {"name":"Treadmill Walk","focus":"Cardio","equipment":["Treadmill"],"kind":"cardio","cue":"Walk tall. Start easy, then increase pace or incline."},
+    {"name":"Elliptical","focus":"Cardio","equipment":["Elliptical"],"kind":"cardio","cue":"Keep your chest tall and push/pull smoothly."},
+    {"name":"Stationary Bike","focus":"Cardio","equipment":["Bike"],"kind":"cardio","cue":"Set the seat so your knee stays slightly bent at the bottom."},
+    {"name":"Goblet Squat","focus":"Lower Body","equipment":["Dumbbells","Kettlebell"],"kind":"squat","cue":"Sit down between your hips; keep knees tracking over toes."},
+    {"name":"Smith Machine Squat","focus":"Lower Body","equipment":["Smith machine"],"kind":"squat","cue":"Brace your core and control the lowering phase."},
+    {"name":"Leg Press","focus":"Lower Body","equipment":["Leg press"],"kind":"squat","cue":"Keep your back against the pad; do not lock the knees."},
+    {"name":"Dumbbell Romanian Deadlift","focus":"Lower Body","equipment":["Dumbbells"],"kind":"hinge","cue":"Push hips back while keeping the weights close to your legs."},
+    {"name":"Glute Bridge","focus":"Lower Body","equipment":["Bodyweight"],"kind":"bridge","cue":"Drive through your heels and squeeze your glutes at the top."},
+    {"name":"Dumbbell Chest Press","focus":"Upper Body","equipment":["Dumbbells","Bench"],"kind":"press","cue":"Keep wrists stacked and lower with control."},
+    {"name":"Machine Chest Press","focus":"Upper Body","equipment":["Selectorized machines"],"kind":"press","cue":"Set the seat so handles line up around mid-chest."},
+    {"name":"Cable Row","focus":"Upper Body","equipment":["Cable machine"],"kind":"row","cue":"Pull elbows back and avoid shrugging."},
+    {"name":"Lat Pulldown","focus":"Upper Body","equipment":["Selectorized machines","Cable machine"],"kind":"row","cue":"Pull toward upper chest; keep ribs down."},
+    {"name":"Dumbbell Shoulder Press","focus":"Upper Body","equipment":["Dumbbells"],"kind":"press","cue":"Press overhead without arching your lower back."},
+    {"name":"Dumbbell Curl","focus":"Upper Body","equipment":["Dumbbells"],"kind":"curl","cue":"Keep elbows close to your sides."},
+    {"name":"Cable Triceps Pressdown","focus":"Upper Body","equipment":["Cable machine"],"kind":"press","cue":"Keep elbows pinned and straighten fully without swinging."},
+    {"name":"Step-Up","focus":"Full Body","equipment":["Bench","Bench / chair"],"kind":"step","cue":"Plant your whole foot and drive through the working leg."},
+    {"name":"Bodyweight Squat","focus":"Lower Body","equipment":["Bodyweight"],"kind":"squat","cue":"Sit back and down with control."},
+    {"name":"Incline Push-Up","focus":"Upper Body","equipment":["Bodyweight","Bench","Bench / chair"],"kind":"press","cue":"Keep your body in one straight line."},
+    {"name":"Dead Bug","focus":"Core","equipment":["Bodyweight"],"kind":"core","cue":"Keep your lower back gently pressed down."},
+    {"name":"Bird Dog","focus":"Core","equipment":["Bodyweight"],"kind":"core","cue":"Reach long without rotating your hips."},
+    {"name":"Plank","focus":"Core","equipment":["Bodyweight"],"kind":"core","cue":"Brace like someone is about to tap your stomach."},
+    {"name":"Kettlebell Deadlift","focus":"Full Body","equipment":["Kettlebell"],"kind":"hinge","cue":"Hinge at the hips and stand by squeezing glutes."},
+]
+
+def exercise_animation(name,kind):
+    # Lightweight animated SVG stored directly in the app; no external image dependency.
+    motions={
+        "squat":"translate(0,8)","hinge":"rotate(15 60 50)","press":"translate(0,-7)",
+        "row":"translate(-8,0)","curl":"rotate(-18 60 58)","bridge":"translate(0,-6)",
+        "step":"translate(8,-6)","core":"rotate(6 60 55)","cardio":"translate(8,0)"
+    }
+    motion=motions.get(kind,"translate(5,0)")
+    return f"""
+    <div style='border:1px solid #ddd;border-radius:14px;padding:8px;max-width:240px'>
+      <svg viewBox='0 0 120 120' width='100%' height='150' role='img' aria-label='{html.escape(name)} animated demonstration'>
+        <line x1='20' y1='105' x2='100' y2='105' stroke='currentColor' stroke-width='3'/>
+        <g style='transform-origin:60px 60px;animation:move 1.3s ease-in-out infinite alternate'>
+          <circle cx='60' cy='25' r='10' fill='none' stroke='currentColor' stroke-width='4'/>
+          <line x1='60' y1='35' x2='60' y2='68' stroke='currentColor' stroke-width='5'/>
+          <line x1='60' y1='45' x2='43' y2='58' stroke='currentColor' stroke-width='4'/>
+          <line x1='60' y1='45' x2='78' y2='55' stroke='currentColor' stroke-width='4'/>
+          <line x1='60' y1='68' x2='45' y2='95' stroke='currentColor' stroke-width='5'/>
+          <line x1='60' y1='68' x2='78' y2='95' stroke='currentColor' stroke-width='5'/>
+        </g>
+      </svg>
+      <style>@keyframes move{{from{{transform:none}}to{{transform:{motion}}}}}</style>
+      <div style='font-weight:700;text-align:center'>{html.escape(name)}</div>
+    </div>"""
+
+def build_smart_workout(gym,available,goal,focus,mins,level,days=1):
+    allowed=set(available)
+    candidates=[]
+    for e in SMART_EXERCISES:
+        if any(eq in allowed for eq in e["equipment"]):
+            if focus=="Full Body" or e["focus"]==focus or (focus=="Cardio" and e["kind"]=="cardio"):
+                candidates.append(e)
+    if len(candidates)<4:
+        candidates=[e for e in SMART_EXERCISES if any(eq in allowed for eq in e["equipment"])]
+    if not candidates:
+        candidates=[e for e in SMART_EXERCISES if "Bodyweight" in e["equipment"]]
+
+    strength=[e for e in candidates if e["kind"]!="cardio"]
+    cardio=[e for e in candidates if e["kind"]=="cardio"]
+    plan=[]
+    for dayn in range(days):
+        random.seed(f"{gym}-{goal}-{focus}-{mins}-{level}-{dayn}")
+        n=3 if mins<=20 else 5 if mins<=40 else 6
+        chosen=random.sample(strength,min(n,len(strength))) if strength else []
+        if goal in ("Lose weight","Improve stamina","General fitness") and cardio:
+            chosen=[random.choice(cardio)]+chosen
+        plan.append(chosen[:max(3,n)])
+    return plan
+
 def trainer():
-    st.title('🏋🏾‍♀️ My Trainer')
-    food_goal=(get_setting('food_profile',{}) or {}).get('goal','General health'); st.caption(f'Food plan goal currently connected: **{food_goal}**')
-    tabs=st.tabs(['Build Routine','Log Workout','History'])
+    st.title("🏋🏾‍♀️ My Trainer")
+    tabs=st.tabs(["Build Plan","Today's Workout","Log Workout","Weight","History"])
+
+    profile=get_setting("trainer_profile",{}) or {}
     with tabs[0]:
-        c=st.columns(5); goal=c[0].selectbox('Goal',['Lose weight','Build strength','Tone / definition','Improve stamina','General fitness','Other']); focus=c[1].selectbox('Focus',list(EXERCISES.keys())+['Other']); mins=c[2].selectbox('Time available',[10,15,20,25,30,40,45,60]); level=c[3].selectbox('Difficulty',['Beginner','Easy','Moderate','Challenging']); energy=c[4].selectbox('Energy today',['Low','Okay','Good','High'])
-        st.multiselect('Equipment available',['Bodyweight','Dumbbells','Kettlebell','Elliptical','Resistance band','Bench / chair','Other'],default=['Bodyweight']); limitations=st.text_input('Limitations / notes')
-        if st.button('Build my routine',use_container_width=True):
-            base=EXERCISES.get(focus,EXERCISES['Full Body'])[:]; n=max(3,min(len(base),round(mins/6))); chosen=random.sample(base,n) if len(base)>=n else base; rounds=2 if mins<=20 else 3
-            st.session_state.routine={'name':f'{mins}-min {focus}','exercises':chosen,'rounds':rounds,'mins':mins,'focus':focus,'level':level}
-        r=st.session_state.get('routine')
-        if r:
-            st.success(f"{r['name']} • {r['rounds']} rounds")
-            for i,e in enumerate(r['exercises'],1): st.write(f'**{i}. {e}** — 8–12 reps or 40 seconds')
-            if st.button('✅ Complete & save workout',use_container_width=True): execute('INSERT INTO workouts(workout_date,name,minutes,intensity,focus,completed,note) VALUES(?,?,?,?,?,?,?)',(date.today().isoformat(),r['name'],r['mins'],r['level'],r['focus'],1,limitations)); st.rerun()
+        st.subheader("Build a workout around where you are")
+        c=st.columns(4)
+        weight=c[0].number_input("Current weight (lb)",min_value=50.0,max_value=500.0,value=float(profile.get("weight",180.0)),step=0.5)
+        gym=c[1].selectbox("Where are you working out?",list(GYM_EQUIPMENT.keys()),
+                          index=list(GYM_EQUIPMENT.keys()).index(profile.get("gym","Planet Fitness")) if profile.get("gym") in GYM_EQUIPMENT else 0)
+        horizon=c[2].selectbox("Build",["Today","1 Week","1 Month"])
+        mins=c[3].selectbox("Minutes per workout",[15,20,25,30,40,45,60],index=3)
+
+        c=st.columns(4)
+        goal=c[0].selectbox("Goal",["Lose weight","Build strength","Tone / definition","Improve stamina","General fitness"])
+        focus=c[1].selectbox("Focus",["Full Body","Lower Body","Upper Body","Core","Cardio"])
+        level=c[2].selectbox("Level",["Beginner","Easy","Moderate","Challenging"])
+        days_per_week=c[3].selectbox("Workout days / week",[2,3,4,5,6],index=1)
+
+        default_equipment=GYM_EQUIPMENT[gym]
+        available=st.multiselect("Equipment available today",sorted(set(sum(GYM_EQUIPMENT.values(),[]))),
+                                 default=default_equipment,key=f"gym_equipment_{gym}")
+        limitations=st.text_input("Anything I should avoid or work around?",value=profile.get("limitations",""))
+
+        if st.button("Build My Training Plan",type="primary",use_container_width=True):
+            set_setting("trainer_profile",{"weight":weight,"gym":gym,"limitations":limitations,"goal":goal})
+            if not rows("SELECT id FROM weight_log WHERE log_date=?",(date.today().isoformat(),)):
+                execute("INSERT INTO weight_log(log_date,weight,note) VALUES(?,?,?)",(date.today().isoformat(),float(weight),"Saved from My Trainer"))
+            else:
+                execute("UPDATE weight_log SET weight=? WHERE log_date=?",(float(weight),date.today().isoformat()))
+            days=1 if horizon=="Today" else days_per_week if horizon=="1 Week" else days_per_week*4
+            plan=build_smart_workout(gym,available,goal,focus,mins,level,days)
+            st.session_state["smart_training_plan"]={
+                "horizon":horizon,"gym":gym,"weight":weight,"goal":goal,"focus":focus,"mins":mins,
+                "level":level,"days_per_week":days_per_week,"plan":plan,"limitations":limitations
+            }
+
+        plan=st.session_state.get("smart_training_plan")
+        if plan:
+            st.success(f"{plan['horizon']} plan · {plan['gym']} · {plan['mins']} minutes · {plan['goal']}")
+            if plan["limitations"]:
+                st.caption(f"Your note: {plan['limitations']}. Adjust/skip anything that causes pain.")
+            for i,dayplan in enumerate(plan["plan"],1):
+                label="Today" if len(plan["plan"])==1 else f"Workout {i}"
+                with st.expander(label,expanded=(i==1)):
+                    st.write("Warm-up: 3–5 minutes easy movement.")
+                    for j,e in enumerate(dayplan,1):
+                        cardio=e["kind"]=="cardio"
+                        dose="8–12 minutes" if cardio else ("2 sets × 8–10 reps" if plan["level"] in ("Beginner","Easy") else "3 sets × 8–12 reps")
+                        st.markdown(f"**{j}. {e['name']}** — {dose}")
+                        st.caption(e["cue"])
+                        components.html(exercise_animation(e["name"],e["kind"]),height=205)
+                    st.write("Cool-down: 3–5 minutes easy walking and comfortable mobility.")
+
     with tabs[1]:
-        with st.form('workoutlog',clear_on_submit=True):
-            c=st.columns(5); d=c[0].date_input('Date',date.today()); name=c[1].text_input('Workout name'); mins=c[2].number_input('Minutes',0,300,step=5); intensity=c[3].selectbox('Intensity',['Easy','Moderate','Hard']); focus=c[4].selectbox('Focus area',list(EXERCISES.keys())+['Other'],key='lfocus'); note=st.text_input('Notes')
-            if st.form_submit_button('Log workout'): execute('INSERT INTO workouts(workout_date,name,minutes,intensity,focus,completed,note) VALUES(?,?,?,?,?,?,?)',(d.isoformat(),name,mins,intensity,focus,1,note)); st.rerun()
+        plan=st.session_state.get("smart_training_plan")
+        if not plan:
+            st.info("Build a plan first. Your first workout will show here.")
+        else:
+            dayplan=plan["plan"][0]
+            st.subheader(f"Today's {plan['gym']} Workout")
+            for j,e in enumerate(dayplan,1):
+                st.markdown(f"### {j}. {e['name']}")
+                st.caption(e["cue"])
+                components.html(exercise_animation(e["name"],e["kind"]),height=205)
+            if st.button("✅ Complete & Save Today's Workout",use_container_width=True):
+                execute("INSERT INTO workouts(workout_date,name,minutes,intensity,focus,completed,note) VALUES(?,?,?,?,?,?,?)",
+                        (date.today().isoformat(),f"{plan['gym']} · {plan['focus']}",int(plan["mins"]),plan["level"],plan["focus"],1,plan.get("limitations","")))
+                st.success("Workout saved.")
+                st.rerun()
+
     with tabs[2]:
-        w=df_from('SELECT * FROM workouts ORDER BY workout_date DESC,id DESC');
-        if not w.empty: st.dataframe(w[['workout_date','name','minutes','intensity','focus','note']],use_container_width=True,hide_index=True)
-        delete_reset_panel('workouts','workout history','name')
+        with st.form("workoutlog",clear_on_submit=True):
+            c=st.columns(5)
+            d=c[0].date_input("Date",date.today(),format="MM/DD/YYYY")
+            name=c[1].text_input("Workout name")
+            mins2=c[2].number_input("Minutes",0,300,step=5)
+            intensity=c[3].selectbox("Intensity",["Easy","Moderate","Hard"])
+            focus2=c[4].selectbox("Focus area",["Full Body","Lower Body","Upper Body","Core","Cardio","Other"])
+            note=st.text_input("Notes")
+            if st.form_submit_button("Log workout"):
+                execute("INSERT INTO workouts(workout_date,name,minutes,intensity,focus,completed,note) VALUES(?,?,?,?,?,?,?)",
+                        (d.isoformat(),name,mins2,intensity,focus2,1,note))
+                st.rerun()
+
+    with tabs[3]:
+        st.subheader("Weight")
+        latest=rows("SELECT * FROM weight_log ORDER BY log_date DESC,id DESC LIMIT 1")
+        current=float(latest[0]["weight"]) if latest else float(profile.get("weight",180.0))
+        with st.form("weight_entry",clear_on_submit=True):
+            c=st.columns(3)
+            wd=c[0].date_input("Date",date.today(),format="MM/DD/YYYY")
+            ww=c[1].number_input("Weight (lb)",min_value=50.0,max_value=500.0,value=current,step=0.5)
+            wn=c[2].text_input("Note")
+            if st.form_submit_button("Save Weight",use_container_width=True):
+                execute("INSERT INTO weight_log(log_date,weight,note) VALUES(?,?,?)",(wd.isoformat(),float(ww),wn))
+                p=get_setting("trainer_profile",{}) or {}; p["weight"]=float(ww); set_setting("trainer_profile",p)
+                st.rerun()
+        wh=df_from("SELECT log_date,weight,note FROM weight_log ORDER BY log_date DESC LIMIT 30")
+        if not wh.empty: st.dataframe(display_df_us(wh),use_container_width=True,hide_index=True)
+
+    with tabs[4]:
+        w=df_from("SELECT * FROM workouts ORDER BY workout_date DESC,id DESC")
+        if not w.empty:
+            st.dataframe(display_df_us(w[["workout_date","name","minutes","intensity","focus","note"]]),use_container_width=True,hide_index=True)
+        delete_reset_panel("workouts","workout history","name")
 
 # ---------- Water + random multi-jug game ----------
 def neighbors_n(state,caps):
@@ -4479,7 +4908,7 @@ def health():
             st.image(up,use_container_width=True)
             st.caption("Screenshot loaded. Enter/confirm the values visible in the screenshot. The confirmation step prevents a misread image from becoming permanent health data.")
             with st.form("confirm_samsung"):
-                d=st.date_input("Date shown",date.today())
+                d=st.date_input("Date shown",date.today(),format="MM/DD/YYYY")
                 c=st.columns(4)
                 steps=c[0].number_input("Steps shown",min_value=0,step=100,key="shsteps")
                 active=c[1].number_input("Active calories shown",min_value=0.0,step=10.0,key="shactive")
@@ -4501,7 +4930,7 @@ def health():
         st.subheader("🩸 Cycle Tracker")
         with st.form("cyclelog",clear_on_submit=True):
             c=st.columns(4)
-            d=c[0].date_input("Date",date.today(),key="cycledate")
+            d=c[0].date_input("Date",date.today(),format="MM/DD/YYYY",key="cycledate")
             status=c[1].selectbox("Period status",["No period","Started today","Period day","Ended today","Spotting"])
             flow=c[2].selectbox("Flow",["None","Light","Medium","Heavy"])
             cramps=c[3].selectbox("Cramps",["None","Mild","Moderate","Strong"])
@@ -4537,7 +4966,7 @@ def health():
             food=c[2].selectbox("With food?",["Not specified","Yes","No","Either"])
             reason=c[3].text_input("Why I take it / goal")
             c=st.columns(3)
-            startd=c[0].date_input("Start date",date.today())
+            startd=c[0].date_input("Start date",date.today(),format="MM/DD/YYYY")
             endtxt=c[1].text_input("End date if applicable")
             labelnotes=c[2].text_input("Label notes / warnings")
             if st.form_submit_button("Confirm & Save Product",use_container_width=True):
@@ -4896,6 +5325,7 @@ _renderers={
     'Food & Nutrition':food,
     'Grocery Shopping':grocery,
     'My Trainer':trainer,
+    'AI Reflection Coach':reflection_coach,
     'Water & Jug Puzzles':water_page,
     'Vocabulary':vocabulary,
     'Growth Lab':growth,
