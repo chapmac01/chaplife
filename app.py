@@ -11,7 +11,7 @@ DB_PATH = APP_DIR / 'chaplife.db'
 
 st.set_page_config(page_title='ChapLife', page_icon='✨', layout='wide', initial_sidebar_state='collapsed')
 
-BUILD_VERSION='ChapLife Cloud v6.9.3 · Finance Schema Fix'
+BUILD_VERSION='ChapLife Cloud v6.9 · Paycheck Flow + Real Trainer'
 
 st.markdown('''
 <style>
@@ -687,7 +687,7 @@ def goto(p): st.session_state.page=p
 
 pages = {
  'Home':'🏠', 'Finances':'💰', 'Food & Nutrition':'🥗', 'Grocery Shopping':'🛒', 'My Trainer':'🏋🏾‍♀️',
- 'Water & Jug Puzzles':'💧', 'Vocabulary':'📖', 'Health & Life':'❤️', 'Career Simulator':'🏗️',
+ 'AI Reflection Coach':'🪞', 'Water & Jug Puzzles':'💧', 'Vocabulary':'📖', 'Health & Life':'❤️', 'Career Simulator':'🏗️',
  'My Progress':'📈', 'Settings':'⚙️'
 }
 
@@ -829,7 +829,7 @@ def home():
     insights=_dashboard_insights()
     grid=[
         ('💰','Finances'),('🥗','Food & Nutrition'),('🛒','Grocery Shopping'),
-        ('🏋🏾‍♀️','My Trainer'),('💧','Water & Jug Puzzles'),('📖','Vocabulary'),
+        ('🏋🏾‍♀️','My Trainer'),('🪞','AI Reflection Coach'),('💧','Water & Jug Puzzles'),('📖','Vocabulary'),
         ('🏗️','Career Simulator'),('❤️','Health & Life')
     ]
     if bool(get_setting('show_growth_section',False)):
@@ -1481,7 +1481,7 @@ def _render_provider_wallet(provider,keyprefix):
             c=st.columns(3)
             orig=c[0].number_input("Original balance",min_value=0.0,value=float(bp["original_amount"] or 0),step=5.0,key=f"{keyprefix}_orig_{bid}")
             remain=c[1].number_input("Current balance",min_value=0.0,value=float(bp["remaining_balance"] or 0),step=5.0,key=f"{keyprefix}_rem_{bid}")
-            aprv=c[2].number_input("APR %",min_value=0.0,max_value=100.0,value=float(bp["apr"] or 0) if "apr" in bp.keys() else 0.0,step=.01,key=f"{keyprefix}_apr_{bid}")
+            aprv=c[2].number_input("APR %",min_value=0.0,max_value=100.0,value=float(bp["apr"] or 0),step=.01,key=f"{keyprefix}_apr_{bid}")
             if st.button("💾 Save Changes",key=f"{keyprefix}_save_{bid}",use_container_width=True):
                 execute("UPDATE bnpl_purchases SET original_amount=?,remaining_balance=?,apr=? WHERE id=?",(orig,remain,aprv,bid)); st.rerun()
             sched=df_from("SELECT due_date,amount,status,paid_date FROM bnpl_installments WHERE purchase_id=? ORDER BY due_date",(bid,))
@@ -1495,30 +1495,8 @@ def _render_provider_wallet(provider,keyprefix):
                 st.success("Account deleted and Finance totals recalculated.")
                 st.rerun()
 
-
-def ensure_finance_schema():
-    """Bring older ChapLife finance databases forward before any Finance tab runs."""
-    migrations=[
-        ("bnpl_purchases","apr","REAL DEFAULT 0"),
-        ("paycheck_plan_items","paid_date","TEXT"),
-        ("savings_contributions","paycheck_id","INTEGER"),
-    ]
-    conn=get_conn()
-    try:
-        for table,column,definition in migrations:
-            try:
-                cols=[r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()]
-                if column not in cols:
-                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
-            except Exception:
-                pass
-        conn.commit()
-    finally:
-        conn.close()
-
 def finances():
     st.title("💰 Finances")
-    ensure_finance_schema()
     preload_uploaded_budget_once()
     seed_recurring_due_dates_once()
     reassign_bnpl_installments()
@@ -1536,29 +1514,12 @@ def finances():
             s=_command_center(p)
             pid=p["id"]
             st.markdown("### ✅ What This Check Actually Paid")
-            try:
-                paid_plan=df_from("""SELECT category,name,planned_amount,actual_amount,status,paid_date,note
-                                     FROM paycheck_plan_items WHERE paycheck_id=? AND status='Paid' ORDER BY id""",(pid,))
-            except Exception:
-                try:
-                    conn=get_conn()
-                    conn.execute("ALTER TABLE paycheck_plan_items ADD COLUMN paid_date TEXT")
-                    conn.commit()
-                    conn.close()
-                except Exception:
-                    pass
-                paid_plan=df_from("""SELECT category,name,planned_amount,actual_amount,status,NULL AS paid_date,note
-                                     FROM paycheck_plan_items WHERE paycheck_id=? AND status='Paid' ORDER BY id""",(pid,))
-            try:
-                paid_bnpl=df_from("""SELECT p.provider AS category,p.merchant AS name,i.amount AS actual_amount,
-                                            i.amount AS planned_amount,i.status,i.paid_date,'' AS note
-                                     FROM bnpl_installments i JOIN bnpl_purchases p ON p.id=i.purchase_id
-                                     WHERE i.paycheck_id=? AND i.status='Paid' ORDER BY i.paid_date,p.provider""",(pid,))
-            except Exception:
-                paid_bnpl=df_from("""SELECT p.provider AS category,p.merchant AS name,i.amount AS actual_amount,
-                                            i.amount AS planned_amount,i.status,NULL AS paid_date,'' AS note
-                                     FROM bnpl_installments i JOIN bnpl_purchases p ON p.id=i.purchase_id
-                                     WHERE i.paycheck_id=? AND i.status='Paid' ORDER BY p.provider""",(pid,))
+            paid_plan=df_from("""SELECT category,name,planned_amount,actual_amount,status,paid_date,note
+                                 FROM paycheck_plan_items WHERE paycheck_id=? AND status='Paid' ORDER BY id""",(pid,))
+            paid_bnpl=df_from("""SELECT p.provider AS category,p.merchant AS name,i.amount AS actual_amount,
+                                        i.amount AS planned_amount,i.status,i.paid_date,'' AS note
+                                 FROM bnpl_installments i JOIN bnpl_purchases p ON p.id=i.purchase_id
+                                 WHERE i.paycheck_id=? AND i.status='Paid' ORDER BY i.paid_date,p.provider""",(pid,))
             pieces=[]
             if not paid_plan.empty: pieces.append(paid_plan)
             if not paid_bnpl.empty: pieces.append(paid_bnpl)
@@ -1568,19 +1529,7 @@ def finances():
                 spent=float(pd.to_numeric(actual["actual_amount"],errors="coerce").fillna(0).sum())
             else:
                 spent=0.0; st.caption("Nothing has been marked paid from this check yet.")
-            # Older ChapLife databases may not have paycheck_id on savings_contributions yet.
-            # Self-heal the schema here instead of letting Finance crash.
-            try:
-                saved=rows("""SELECT COALESCE(SUM(amount),0) AS x FROM savings_contributions WHERE paycheck_id=?""",(pid,))[0]["x"]
-            except Exception:
-                try:
-                    conn=get_conn()
-                    conn.execute("ALTER TABLE savings_contributions ADD COLUMN paycheck_id INTEGER")
-                    conn.commit()
-                    conn.close()
-                    saved=0.0
-                except Exception:
-                    saved=0.0
+            saved=rows("""SELECT COALESCE(SUM(amount),0) AS x FROM savings_contributions WHERE paycheck_id=?""",(pid,))[0]["x"]
             income=float(p["actual"] or p["expected"] or 0)
             c=st.columns(4)
             c[0].metric("Check",money(income))
@@ -5295,6 +5244,7 @@ _renderers={
     'Food & Nutrition':food,
     'Grocery Shopping':grocery,
     'My Trainer':trainer,
+    'AI Reflection Coach':reflection_coach,
     'Water & Jug Puzzles':water_page,
     'Vocabulary':vocabulary,
     'Growth Lab':growth,
