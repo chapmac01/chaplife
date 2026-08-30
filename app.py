@@ -11,7 +11,7 @@ DB_PATH = APP_DIR / 'chaplife.db'
 
 st.set_page_config(page_title='ChapLife', page_icon='✨', layout='wide', initial_sidebar_state='collapsed')
 
-BUILD_VERSION='ChapLife Cloud v6.5 · Card Paydown'
+BUILD_VERSION='ChapLife Cloud v6.6 · Editable Finance Corrections'
 
 st.markdown('''
 <style>
@@ -107,6 +107,7 @@ def init_db():
         payment_frequency TEXT,
         installment_count INTEGER,
         first_payment_date TEXT,
+        apr REAL DEFAULT 0,
         status TEXT DEFAULT 'Active',
         note TEXT
     );
@@ -1503,12 +1504,41 @@ def finances():
                 st.success(msg)
 
         st.markdown("### Active purchases")
-        purchases=df_from("""SELECT id,provider,merchant,purchase_date,original_amount,remaining_balance,payment_frequency,installment_count,status
+        purchases=df_from("""SELECT id,provider,merchant,purchase_date,original_amount,remaining_balance,payment_frequency,installment_count,apr,status
                              FROM bnpl_purchases ORDER BY CASE status WHEN 'Active' THEN 0 ELSE 1 END,purchase_date DESC""")
         if purchases.empty:
             st.caption("No Affirm/Klarna purchases recorded yet.")
         else:
             st.dataframe(display_df_us(purchases),use_container_width=True,hide_index=True)
+            st.markdown("### ✏️ Correct Affirm / Klarna Information")
+            st.caption("You can fix the original amount, current balance, and APR if the provider/account shows one. APR can stay 0.00 if it does not apply or you do not have one.")
+            active_rows=purchases[purchases["status"].astype(str).eq("Active")]
+            for _,bp in active_rows.iterrows():
+                bid=int(bp["id"])
+                provider=str(bp["provider"]); merchant=str(bp["merchant"])
+                with st.expander(f"{provider} · {merchant}"):
+                    c1,c2,c3=st.columns(3)
+                    orig=c1.number_input(
+                        "Original amount",
+                        min_value=0.0,value=float(bp["original_amount"] or 0),step=5.0,
+                        key=f"bnpl_orig_{bid}"
+                    )
+                    remain=c2.number_input(
+                        "Current balance",
+                        min_value=0.0,value=float(bp["remaining_balance"] or 0),step=5.0,
+                        key=f"bnpl_remain_{bid}"
+                    )
+                    apr_val=c3.number_input(
+                        "APR % (if available)",
+                        min_value=0.0,max_value=100.0,value=float(bp["apr"] or 0),step=0.01,
+                        key=f"bnpl_apr_{bid}"
+                    )
+                    if st.button("💾 Save Changes",key=f"save_bnpl_{bid}",use_container_width=True):
+                        execute("UPDATE bnpl_purchases SET original_amount=?,remaining_balance=?,apr=? WHERE id=?",
+                                (float(orig),float(remain),float(apr_val),bid))
+                        st.success(f"{provider} · {merchant} updated.")
+                        st.rerun()
+
             active=rows("SELECT * FROM bnpl_purchases WHERE status='Active' ORDER BY provider,merchant")
             if active:
                 pmap={f"{x['provider']} · {x['merchant']} · remaining {money(x['remaining_balance'])}":x for x in active}
@@ -1544,36 +1574,44 @@ def finances():
 
                 with st.container(border=True):
                     st.markdown(f"#### {cname}")
-                    c1,c2,c3=st.columns(3)
-                    c1.metric("Balance",money(balance))
-                    c2.metric("APR used",f"{saved_apr:.2f}%")
-                    c3.metric("Current minimum",money(float(card["min_payment"] or 0)))
+                    st.caption("Use these fields to correct the saved information. Nothing changes until you press Save Changes.")
 
-                    exact_apr=st.number_input(
+                    c1,c2,c3=st.columns(3)
+                    edit_balance=c1.number_input(
+                        f"{cname} balance",
+                        min_value=0.0,value=float(balance),step=25.0,
+                        key=f"edit_card_balance_{cid}"
+                    )
+                    exact_apr=c2.number_input(
                         f"{cname} Purchase APR (%)",
                         min_value=0.0,max_value=50.0,value=float(saved_apr),step=0.01,
                         key=f"card_apr_{cid}",
                         help="Use the Purchase APR from your most recent statement."
                     )
+                    edit_min=c3.number_input(
+                        f"{cname} minimum payment",
+                        min_value=0.0,value=float(card["min_payment"] or 0),step=5.0,
+                        key=f"edit_card_min_{cid}"
+                    )
+
                     principal_goal=st.number_input(
                         f"How much {cname} principal do you want to knock off this month?",
                         min_value=0.0,value=100.0,step=25.0,key=f"principal_goal_{cid}"
                     )
 
-                    est_interest=balance*(float(exact_apr)/100.0)/12.0
-                    minimum=float(card["min_payment"] or 0)
-                    recommended=max(minimum,est_interest+float(principal_goal))
-                    after=max(0.0,balance-float(principal_goal))
+                    est_interest=float(edit_balance)*(float(exact_apr)/100.0)/12.0
+                    recommended=max(float(edit_min),est_interest+float(principal_goal))
+                    after=max(0.0,float(edit_balance)-float(principal_goal))
 
                     a,b,c=st.columns(3)
                     a.metric("Est. interest this month",money(est_interest))
                     b.metric("Suggested payment",money(recommended))
                     c.metric("Est. balance after principal",money(after))
-                    st.caption(f"Planning estimate: about {money(est_interest)} covers one month of interest and about {money(principal_goal)} attacks principal. Actual card interest is generally based on daily/average daily balances, so the statement amount can differ.")
 
-                    if st.button(f"Save {cname} APR",key=f"save_card_apr_{cid}",use_container_width=True):
-                        execute("UPDATE debts SET apr=? WHERE id=?",(float(exact_apr),cid))
-                        st.success(f"{cname} APR saved at {exact_apr:.2f}%.")
+                    if st.button(f"💾 Save {cname} Changes",key=f"save_card_changes_{cid}",use_container_width=True):
+                        execute("UPDATE debts SET balance=?,apr=?,min_payment=? WHERE id=?",
+                                (float(edit_balance),float(exact_apr),float(edit_min),cid))
+                        st.success(f"{cname} information saved.")
                         st.rerun()
 
             st.markdown("### All Cards / Debt")
