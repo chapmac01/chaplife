@@ -11,7 +11,7 @@ DB_PATH = APP_DIR / 'chaplife.db'
 
 st.set_page_config(page_title='ChapLife', page_icon='✨', layout='wide', initial_sidebar_state='collapsed')
 
-BUILD_VERSION='ChapLife Cloud v6.9.2 · Finance Compatibility Fix'
+BUILD_VERSION='ChapLife Cloud v6.9.3 · Finance Schema Fix'
 
 st.markdown('''
 <style>
@@ -687,7 +687,7 @@ def goto(p): st.session_state.page=p
 
 pages = {
  'Home':'🏠', 'Finances':'💰', 'Food & Nutrition':'🥗', 'Grocery Shopping':'🛒', 'My Trainer':'🏋🏾‍♀️',
- 'AI Reflection Coach':'🪞', 'Water & Jug Puzzles':'💧', 'Vocabulary':'📖', 'Health & Life':'❤️', 'Career Simulator':'🏗️',
+ 'Water & Jug Puzzles':'💧', 'Vocabulary':'📖', 'Health & Life':'❤️', 'Career Simulator':'🏗️',
  'My Progress':'📈', 'Settings':'⚙️'
 }
 
@@ -827,16 +827,9 @@ def home():
 
     st.subheader('My dashboard')
     insights=_dashboard_insights()
-    # Every dashboard card must have three safe preview lines.
-    # AI Reflection Coach is private conversation history, so Home never previews message content.
-    insights.setdefault("AI Reflection Coach",[
-        "Private reflection conversations",
-        "Honest feedback without automatic agreement",
-        "Open when you want to talk something through"
-    ])
     grid=[
         ('💰','Finances'),('🥗','Food & Nutrition'),('🛒','Grocery Shopping'),
-        ('🏋🏾‍♀️','My Trainer'),('🪞','AI Reflection Coach'),('💧','Water & Jug Puzzles'),('📖','Vocabulary'),
+        ('🏋🏾‍♀️','My Trainer'),('💧','Water & Jug Puzzles'),('📖','Vocabulary'),
         ('🏗️','Career Simulator'),('❤️','Health & Life')
     ]
     if bool(get_setting('show_growth_section',False)):
@@ -1488,7 +1481,7 @@ def _render_provider_wallet(provider,keyprefix):
             c=st.columns(3)
             orig=c[0].number_input("Original balance",min_value=0.0,value=float(bp["original_amount"] or 0),step=5.0,key=f"{keyprefix}_orig_{bid}")
             remain=c[1].number_input("Current balance",min_value=0.0,value=float(bp["remaining_balance"] or 0),step=5.0,key=f"{keyprefix}_rem_{bid}")
-            aprv=c[2].number_input("APR %",min_value=0.0,max_value=100.0,value=float(bp["apr"] or 0),step=.01,key=f"{keyprefix}_apr_{bid}")
+            aprv=c[2].number_input("APR %",min_value=0.0,max_value=100.0,value=float(bp["apr"] or 0) if "apr" in bp.keys() else 0.0,step=.01,key=f"{keyprefix}_apr_{bid}")
             if st.button("💾 Save Changes",key=f"{keyprefix}_save_{bid}",use_container_width=True):
                 execute("UPDATE bnpl_purchases SET original_amount=?,remaining_balance=?,apr=? WHERE id=?",(orig,remain,aprv,bid)); st.rerun()
             sched=df_from("SELECT due_date,amount,status,paid_date FROM bnpl_installments WHERE purchase_id=? ORDER BY due_date",(bid,))
@@ -1502,8 +1495,30 @@ def _render_provider_wallet(provider,keyprefix):
                 st.success("Account deleted and Finance totals recalculated.")
                 st.rerun()
 
+
+def ensure_finance_schema():
+    """Bring older ChapLife finance databases forward before any Finance tab runs."""
+    migrations=[
+        ("bnpl_purchases","apr","REAL DEFAULT 0"),
+        ("paycheck_plan_items","paid_date","TEXT"),
+        ("savings_contributions","paycheck_id","INTEGER"),
+    ]
+    conn=get_conn()
+    try:
+        for table,column,definition in migrations:
+            try:
+                cols=[r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()]
+                if column not in cols:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+            except Exception:
+                pass
+        conn.commit()
+    finally:
+        conn.close()
+
 def finances():
     st.title("💰 Finances")
+    ensure_finance_schema()
     preload_uploaded_budget_once()
     seed_recurring_due_dates_once()
     reassign_bnpl_installments()
@@ -5280,7 +5295,6 @@ _renderers={
     'Food & Nutrition':food,
     'Grocery Shopping':grocery,
     'My Trainer':trainer,
-    'AI Reflection Coach':reflection_coach,
     'Water & Jug Puzzles':water_page,
     'Vocabulary':vocabulary,
     'Growth Lab':growth,
