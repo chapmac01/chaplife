@@ -11,7 +11,7 @@ DB_PATH = APP_DIR / 'chaplife.db'
 
 st.set_page_config(page_title='ChapLife', page_icon='✨', layout='wide', initial_sidebar_state='collapsed')
 
-BUILD_VERSION='ChapLife Cloud v6.9.1 · Home Fix'
+BUILD_VERSION='ChapLife Cloud v6.9.2 · Finance Compatibility Fix'
 
 st.markdown('''
 <style>
@@ -1521,12 +1521,29 @@ def finances():
             s=_command_center(p)
             pid=p["id"]
             st.markdown("### ✅ What This Check Actually Paid")
-            paid_plan=df_from("""SELECT category,name,planned_amount,actual_amount,status,paid_date,note
-                                 FROM paycheck_plan_items WHERE paycheck_id=? AND status='Paid' ORDER BY id""",(pid,))
-            paid_bnpl=df_from("""SELECT p.provider AS category,p.merchant AS name,i.amount AS actual_amount,
-                                        i.amount AS planned_amount,i.status,i.paid_date,'' AS note
-                                 FROM bnpl_installments i JOIN bnpl_purchases p ON p.id=i.purchase_id
-                                 WHERE i.paycheck_id=? AND i.status='Paid' ORDER BY i.paid_date,p.provider""",(pid,))
+            try:
+                paid_plan=df_from("""SELECT category,name,planned_amount,actual_amount,status,paid_date,note
+                                     FROM paycheck_plan_items WHERE paycheck_id=? AND status='Paid' ORDER BY id""",(pid,))
+            except Exception:
+                try:
+                    conn=get_conn()
+                    conn.execute("ALTER TABLE paycheck_plan_items ADD COLUMN paid_date TEXT")
+                    conn.commit()
+                    conn.close()
+                except Exception:
+                    pass
+                paid_plan=df_from("""SELECT category,name,planned_amount,actual_amount,status,NULL AS paid_date,note
+                                     FROM paycheck_plan_items WHERE paycheck_id=? AND status='Paid' ORDER BY id""",(pid,))
+            try:
+                paid_bnpl=df_from("""SELECT p.provider AS category,p.merchant AS name,i.amount AS actual_amount,
+                                            i.amount AS planned_amount,i.status,i.paid_date,'' AS note
+                                     FROM bnpl_installments i JOIN bnpl_purchases p ON p.id=i.purchase_id
+                                     WHERE i.paycheck_id=? AND i.status='Paid' ORDER BY i.paid_date,p.provider""",(pid,))
+            except Exception:
+                paid_bnpl=df_from("""SELECT p.provider AS category,p.merchant AS name,i.amount AS actual_amount,
+                                            i.amount AS planned_amount,i.status,NULL AS paid_date,'' AS note
+                                     FROM bnpl_installments i JOIN bnpl_purchases p ON p.id=i.purchase_id
+                                     WHERE i.paycheck_id=? AND i.status='Paid' ORDER BY p.provider""",(pid,))
             pieces=[]
             if not paid_plan.empty: pieces.append(paid_plan)
             if not paid_bnpl.empty: pieces.append(paid_bnpl)
@@ -1536,7 +1553,19 @@ def finances():
                 spent=float(pd.to_numeric(actual["actual_amount"],errors="coerce").fillna(0).sum())
             else:
                 spent=0.0; st.caption("Nothing has been marked paid from this check yet.")
-            saved=rows("""SELECT COALESCE(SUM(amount),0) AS x FROM savings_contributions WHERE paycheck_id=?""",(pid,))[0]["x"]
+            # Older ChapLife databases may not have paycheck_id on savings_contributions yet.
+            # Self-heal the schema here instead of letting Finance crash.
+            try:
+                saved=rows("""SELECT COALESCE(SUM(amount),0) AS x FROM savings_contributions WHERE paycheck_id=?""",(pid,))[0]["x"]
+            except Exception:
+                try:
+                    conn=get_conn()
+                    conn.execute("ALTER TABLE savings_contributions ADD COLUMN paycheck_id INTEGER")
+                    conn.commit()
+                    conn.close()
+                    saved=0.0
+                except Exception:
+                    saved=0.0
             income=float(p["actual"] or p["expected"] or 0)
             c=st.columns(4)
             c[0].metric("Check",money(income))
