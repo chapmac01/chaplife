@@ -1,6 +1,8 @@
 import streamlit as st
 import streamlit.components.v1 as components
-import sqlite3, json, math, random, io, urllib.parse, urllib.request, urllib.error, xml.etree.ElementTree as ET, re, html, base64, os, hmac, hashlib, secrets, time
+import sqlite3
+import hashlib
+import secrets, json, math, random, io, urllib.parse, urllib.request, urllib.error, xml.etree.ElementTree as ET, re, html, base64, os, hmac, hashlib, secrets, time
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from collections import deque, defaultdict
@@ -11,7 +13,7 @@ DB_PATH = APP_DIR / 'chaplife.db'
 
 st.set_page_config(page_title='ChapLife', page_icon='✨', layout='wide', initial_sidebar_state='collapsed')
 
-BUILD_VERSION='ChapLife Cloud v6.9.7 · Isolated Finance Sections'
+BUILD_VERSION='ChapLife 7.0 · Multi-User Preview'
 
 st.markdown('''
 <style>
@@ -87,10 +89,341 @@ def db():
     conn.row_factory = sqlite3.Row
     return conn
 
+
+OWNER_USERNAME="chennel"
+
+def _hash_password(password):
+    return hashlib.sha256(("chaplife::"+str(password)).encode("utf-8")).hexdigest()
+
+def _new_pin():
+    for _ in range(100):
+        pin=str(secrets.randbelow(900000)+100000)
+        if not rows("SELECT id FROM app_users WHERE pin=?",(pin,)):
+            return pin
+    return str(secrets.randbelow(900000)+100000)
+
+def ensure_multiuser_seed():
+    """Create the owner profile without exposing or copying personal data to future users."""
+    if rows("SELECT id FROM app_users LIMIT 1"):
+        return
+    now=datetime.now().isoformat(timespec="seconds")
+    # Owner gets a generated PIN; password can be created in Profile & Access.
+    execute("""INSERT INTO app_users(pin,username,display_name,password_hash,role,active,profile_visible,bio,created_at,updated_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?)""",
+            (_new_pin(),OWNER_USERNAME,"Chennel","",'owner',1,0,"",now,now))
+    owner=rows("SELECT id FROM app_users WHERE username=?",(OWNER_USERNAME,))[0]["id"]
+    defaults=[
+        ("paycheck","Paycheck"),("plan","Plan"),("affirm","Affirm"),("klarna","Klarna"),
+        ("savings","Savings"),("cards","Cards & Debt"),("bills","Bills & Spending"),
+        ("randi","💲 Randi"),("reports","Reports"),("money_settings","Money Settings")
+    ]
+    for i,(k,n) in enumerate(defaults):
+        try:
+            execute("""INSERT INTO finance_providers(user_id,provider_key,display_name,sort_order,active)
+                       VALUES(?,?,?,?,1)""",(owner,k,n,i))
+        except Exception:
+            pass
+
+def _current_user():
+    uid=st.session_state.get("chaplife_user_id")
+    if uid:
+        rr=rows("SELECT * FROM app_users WHERE id=? AND active=1",(uid,))
+        if rr: return rr[0]
+    # Preview behavior: keep owner logged in so existing ChapLife still opens normally.
+    rr=rows("SELECT * FROM app_users WHERE username=? AND active=1",(OWNER_USERNAME,))
+    if rr:
+        st.session_state["chaplife_user_id"]=rr[0]["id"]
+        return rr[0]
+    return None
+
+def _is_owner():
+    u=_current_user()
+    return bool(u and u["role"]=="owner")
+
+def _safe_display_name(u):
+    return (u["display_name"] or u["username"] or f"User {u['id']}") if u else "ChapLife User"
+
+def _provider_name(provider_key, fallback):
+    u=_current_user()
+    if not u: return fallback
+    r=rows("""SELECT display_name FROM finance_providers
+              WHERE user_id=? AND provider_key=? AND active=1""",(u["id"],provider_key))
+    return r[0]["display_name"] if r and r[0]["display_name"] else fallback
+
+def user_access_center():
+    st.title("👤 Profile & Access")
+    u=_current_user()
+    if not u:
+        st.error("No active ChapLife profile.")
+        return
+
+    st.subheader("My Profile")
+    c=st.columns([1,2])
+    with c[0]:
+        if u["profile_photo"]:
+            try:
+                st.image(u["profile_photo"],width=180)
+            except Exception:
+                st.caption("Profile photo saved.")
+        photo=st.file_uploader("Profile picture",type=["png","jpg","jpeg"],key="profile_pic")
+        if photo is not None:
+            import base64
+            data="data:"+photo.type+";base64,"+base64.b64encode(photo.getvalue()).decode()
+            execute("UPDATE app_users SET profile_photo=?,updated_at=? WHERE id=?",
+                    (data,datetime.now().isoformat(timespec="seconds"),u["id"]))
+            st.rerun()
+
+    with c[1]:
+        with st.form("profile_form"):
+            display=st.text_input("Display name",value=u["display_name"] or "")
+            username=st.text_input("Username",value=u["username"] or "")
+            bio=st.text_area("Short bio",value=u["bio"] or "",height=100)
+            visible=st.toggle("Allow my profile to be visible in future social features",
+                              value=bool(u["profile_visible"]))
+            if st.form_submit_button("Save Profile",use_container_width=True):
+                try:
+                    execute("""UPDATE app_users SET display_name=?,username=?,bio=?,profile_visible=?,updated_at=?
+                               WHERE id=?""",
+                            (display,username,bio,1 if visible else 0,datetime.now().isoformat(timespec="seconds"),u["id"]))
+                    st.success("Profile updated.")
+                    st.rerun()
+                except Exception:
+                    st.error("That username is already in use.")
+
+    st.divider()
+    st.subheader("PIN & Password")
+    st.info(f"Your ChapLife PIN: **{u['pin']}**")
+    with st.form("set_password"):
+        p1=st.text_input("Create / change password",type="password")
+        p2=st.text_input("Confirm password",type="password")
+        if st.form_submit_button("Save Password",use_container_width=True):
+            if len(p1)<6:
+                st.error("Use at least 6 characters.")
+            elif p1!=p2:
+                st.error("Passwords do not match.")
+            else:
+                execute("UPDATE app_users SET password_hash=?,updated_at=? WHERE id=?",
+                        (_hash_password(p1),datetime.now().isoformat(timespec="seconds"),u["id"]))
+                st.success("Password updated.")
+
+    st.divider()
+    st.subheader("Optional Modules")
+    cycle_current=get_setting(f"user_{u['id']}_cycle_mode","My cycle")
+    mode=st.selectbox("Cycle tracking",["My cycle","Partner cycle","Hide cycle tracking"],
+                      index=["My cycle","Partner cycle","Hide cycle tracking"].index(cycle_current)
+                      if cycle_current in ["My cycle","Partner cycle","Hide cycle tracking"] else 0)
+    if st.button("Save Module Choices",use_container_width=True):
+        set_setting(f"user_{u['id']}_cycle_mode",mode)
+        st.success("Saved.")
+
+    st.divider()
+    st.subheader("Delete My Account")
+    confirm=st.checkbox("I understand this disables my ChapLife account.")
+    if st.button("Delete My Account",disabled=not confirm,use_container_width=True):
+        execute("UPDATE app_users SET active=0 WHERE id=?",(u["id"],))
+        st.session_state.pop("chaplife_user_id",None)
+        st.success("Account disabled.")
+
+def feature_request_center():
+    st.title("🛠️ Request Something From Chennel")
+    u=_current_user()
+    st.write("Describe exactly what you want ChapLife to do. The more specific you are, the easier it is to build it the way you pictured it.")
+    with st.form("feature_request_form",clear_on_submit=True):
+        area=st.selectbox("Where should this go?",[
+            "Finances","Health","Trainer","Food","Calendar","Profile","Shared Spaces","Home","Other"
+        ])
+        goal=st.text_area("What are you trying to accomplish?",height=90,
+                          placeholder="Example: I want to split vacation costs with 3 friends and see who still owes what.")
+        current=st.text_area("What happens now?",height=75)
+        desired=st.text_area("Exactly what should happen instead?",height=110)
+        trigger=st.text_area("What should happen after you click / enter / save something?",height=90)
+        visibility=st.selectbox("Who should be able to see it?",[
+            "Only me","People I invite","Everyone in a shared space","All ChapLife users","Owner/admin only"
+        ])
+        inputs=st.text_area("What information should ChapLife ask you for?",height=90)
+        details=st.text_area("Anything else that matters? Include examples, calculations, rules, wording, colors, or layout.",height=120)
+        priority=st.selectbox("How important is this to you?",["Low","Normal","High"])
+        if st.form_submit_button("Send Request",use_container_width=True):
+            execute("""INSERT INTO feature_requests(user_id,created_at,area,goal,current_behavior,desired_behavior,
+                       trigger_action,visibility_scope,required_inputs,details,priority,status)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?,'Submitted')""",
+                    (u["id"] if u else None,datetime.now().isoformat(timespec="seconds"),area,goal,current,
+                     desired,trigger,visibility,inputs,details,priority))
+            st.success("Sent to Chennel.")
+
+    mine=rows("SELECT * FROM feature_requests WHERE user_id=? ORDER BY id DESC",(u["id"],)) if u else []
+    if mine:
+        st.subheader("My Requests")
+        st.dataframe(pd.DataFrame([{
+            "Date":us_date(r["created_at"][:10]),
+            "Area":r["area"],
+            "Request":r["goal"],
+            "Priority":r["priority"],
+            "Status":r["status"]
+        } for r in mine]),use_container_width=True,hide_index=True)
+
+def owner_user_management():
+    if not _is_owner():
+        st.error("Owner access only.")
+        return
+    st.title("🛡️ User Management")
+    users=rows("SELECT * FROM app_users ORDER BY id")
+    for u in users:
+        with st.container(border=True):
+            c=st.columns([2,1,1,1])
+            c[0].markdown(f"**{_safe_display_name(u)}**  \n@{u['username']} · PIN {u['pin']} · {u['role']}")
+            c[1].write("Active" if u["active"] else "Disabled")
+            c[2].write("Profile visible" if u["profile_visible"] else "Private profile")
+            if u["role"]!="owner":
+                if c[3].button("Disable" if u["active"] else "Enable",key=f"toggle_user_{u['id']}"):
+                    execute("UPDATE app_users SET active=? WHERE id=?",(0 if u["active"] else 1,u["id"]))
+                    st.rerun()
+                cc=st.columns(2)
+                if cc[0].button("Reset Password",key=f"reset_pw_{u['id']}"):
+                    execute("UPDATE app_users SET password_hash='' WHERE id=?",(u["id"],))
+                    st.success("Password reset. They can create a new one.")
+                if cc[1].button("Delete Account",key=f"del_user_{u['id']}"):
+                    execute("DELETE FROM app_users WHERE id=?",(u["id"],))
+                    st.rerun()
+
+    st.divider()
+    st.subheader("Create Friend Account")
+    with st.form("create_friend",clear_on_submit=True):
+        c=st.columns(2)
+        display=c[0].text_input("Display name")
+        username=c[1].text_input("Username")
+        if st.form_submit_button("Create Account + PIN",use_container_width=True):
+            now=datetime.now().isoformat(timespec="seconds")
+            try:
+                pin=_new_pin()
+                execute("""INSERT INTO app_users(pin,username,display_name,password_hash,role,active,profile_visible,bio,created_at,updated_at)
+                           VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                        (pin,username.strip(),display.strip(),"",'member',1,0,"",now,now))
+                uid=rows("SELECT id FROM app_users WHERE username=?",(username.strip(),))[0]["id"]
+                # clean provider defaults; no personal balances/history are copied
+                for i,(k,n) in enumerate([("paycheck","Paycheck"),("plan","Plan"),("savings","Savings"),
+                                          ("cards","Cards & Debt"),("bills","Bills & Spending"),
+                                          ("reports","Reports"),("money_settings","Money Settings")]):
+                    execute("""INSERT INTO finance_providers(user_id,provider_key,display_name,sort_order,active)
+                               VALUES(?,?,?,?,1)""",(uid,k,n,i))
+                st.success(f"Account created. PIN: {pin}")
+            except Exception:
+                st.error("That username is already in use.")
+
+    reqs=rows("""SELECT fr.*,u.display_name,u.username FROM feature_requests fr
+                 LEFT JOIN app_users u ON u.id=fr.user_id ORDER BY fr.id DESC""")
+    if reqs:
+        st.divider()
+        st.subheader("Feature Requests")
+        for r in reqs:
+            with st.expander(f"{r['area']} · {_safe_display_name(r)} · {r['status']}"):
+                st.write(r["goal"])
+                st.caption(r["details"] or "")
+                status=st.selectbox("Status",["Submitted","Reviewing","Planned","Added","Can't Add"],
+                                    index=["Submitted","Reviewing","Planned","Added","Can't Add"].index(r["status"])
+                                    if r["status"] in ["Submitted","Reviewing","Planned","Added","Can't Add"] else 0,
+                                    key=f"req_status_{r['id']}")
+                note=st.text_area("Owner note",value=r["owner_note"] or "",key=f"req_note_{r['id']}")
+                if st.button("Save Request Update",key=f"save_req_{r['id']}"):
+                    execute("UPDATE feature_requests SET status=?,owner_note=? WHERE id=?",(status,note,r["id"]))
+                    st.rerun()
+
+def finance_provider_settings():
+    st.subheader("Custom Payment Tabs")
+    u=_current_user()
+    if not u: return
+    provs=rows("""SELECT * FROM finance_providers WHERE user_id=? AND provider_key NOT IN
+                  ('paycheck','plan','savings','cards','bills','randi','reports','money_settings')
+                  ORDER BY sort_order,id""",(u["id"],))
+    for p in provs:
+        with st.container(border=True):
+            c=st.columns([2,1,1])
+            newname=c[0].text_input("Tab name",value=p["display_name"] or p["provider_key"],key=f"pname_{p['id']}")
+            active=c[1].toggle("Show",value=bool(p["active"]),key=f"pactive_{p['id']}")
+            if c[2].button("Save",key=f"psave_{p['id']}"):
+                execute("UPDATE finance_providers SET display_name=?,active=? WHERE id=?",
+                        (newname,1 if active else 0,p["id"]))
+                st.rerun()
+            if st.button("Delete Tab",key=f"pdel_{p['id']}"):
+                execute("DELETE FROM finance_providers WHERE id=?",(p["id"],))
+                st.rerun()
+    with st.form("add_provider"):
+        name=st.text_input("Add payment provider / custom finance tab",placeholder="Afterpay, Zip, PayPal Pay in 4...")
+        if st.form_submit_button("Add Tab",use_container_width=True):
+            key=re.sub(r"[^a-z0-9]+","_",name.lower()).strip("_") or f"provider_{secrets.randbelow(9999)}"
+            mx=rows("SELECT COALESCE(MAX(sort_order),0)+1 AS n FROM finance_providers WHERE user_id=?",(u["id"],))[0]["n"]
+            try:
+                execute("INSERT INTO finance_providers(user_id,provider_key,display_name,sort_order,active) VALUES(?,?,?,?,1)",
+                        (u["id"],key,name,mx))
+                st.rerun()
+            except Exception:
+                st.error("That provider already exists.")
+
 def init_db():
     c=db()
     c.executescript('''
     CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
+    CREATE TABLE IF NOT EXISTS app_users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        pin TEXT UNIQUE,
+        username TEXT UNIQUE,
+        display_name TEXT,
+        password_hash TEXT,
+        role TEXT DEFAULT 'member',
+        active INTEGER DEFAULT 1,
+        profile_visible INTEGER DEFAULT 0,
+        bio TEXT,
+        profile_photo TEXT,
+        created_at TEXT,
+        updated_at TEXT
+    );
+    CREATE TABLE IF NOT EXISTS user_modules (
+        user_id INTEGER,
+        module_key TEXT,
+        enabled INTEGER DEFAULT 1,
+        UNIQUE(user_id,module_key)
+    );
+    CREATE TABLE IF NOT EXISTS finance_providers (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        provider_key TEXT,
+        display_name TEXT,
+        sort_order INTEGER DEFAULT 0,
+        active INTEGER DEFAULT 1,
+        UNIQUE(user_id,provider_key)
+    );
+    CREATE TABLE IF NOT EXISTS feature_requests (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        created_at TEXT,
+        area TEXT,
+        goal TEXT,
+        current_behavior TEXT,
+        desired_behavior TEXT,
+        trigger_action TEXT,
+        visibility_scope TEXT,
+        required_inputs TEXT,
+        details TEXT,
+        priority TEXT DEFAULT 'Normal',
+        status TEXT DEFAULT 'Submitted',
+        owner_note TEXT
+    );
+    CREATE TABLE IF NOT EXISTS shared_spaces (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        owner_user_id INTEGER,
+        space_type TEXT,
+        name TEXT,
+        description TEXT,
+        created_at TEXT,
+        active INTEGER DEFAULT 1
+    );
+    CREATE TABLE IF NOT EXISTS shared_space_members (
+        space_id INTEGER,
+        user_id INTEGER,
+        share_level TEXT DEFAULT 'Member',
+        UNIQUE(space_id,user_id)
+    );
+
     CREATE TABLE IF NOT EXISTS finance_transactions (id INTEGER PRIMARY KEY AUTOINCREMENT, tx_date TEXT, amount REAL, tx_type TEXT, category TEXT, subcategory TEXT, need_want TEXT, merchant TEXT, note TEXT);
     CREATE TABLE IF NOT EXISTS paychecks (id INTEGER PRIMARY KEY AUTOINCREMENT, pay_date TEXT, expected REAL, actual REAL, note TEXT);
     CREATE TABLE IF NOT EXISTS bills (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, amount REAL, due_day INTEGER, category TEXT, autopay INTEGER, note TEXT);
@@ -258,6 +591,7 @@ def df_from(query, params=()):
 
 init_db()
 
+ensure_multiuser_seed()
 # ---------- Private Cloud Sync ----------
 def _secret(name, default=""):
     try:
@@ -688,7 +1022,7 @@ def goto(p): st.session_state.page=p
 pages = {
  'Home':'🏠', 'Finances':'💰', 'Food & Nutrition':'🥗', 'Grocery Shopping':'🛒', 'My Trainer':'🏋🏾‍♀️',
  'Water & Jug Puzzles':'💧', 'Vocabulary':'📖', 'Health & Life':'❤️', 'Career Simulator':'🏗️',
- 'My Progress':'📈', 'Settings':'⚙️'
+ 'My Progress':'📈', 'Settings':'⚙️','Profile & Access':'👤','Request Something':'🛠️','User Management':'🛡️'
 }
 
 # Private sections are hidden from navigation unless explicitly enabled in Settings.
@@ -1541,8 +1875,19 @@ def finances():
     seed_recurring_due_dates_once()
     reassign_bnpl_installments()
 
-    finance_sections=["💵 Paycheck","📝 Plan","🅰️ Affirm","🛍️ Klarna","🏦 Savings",
-                      "💳 Cards & Debt","📅 Bills & Spending","🤝 Randi","📊 Reports","⚙️ Money Settings"]
+    u=_current_user()
+    finance_sections=["💵 Paycheck","📝 Plan"]
+    # Custom provider tabs are user-specific. New users start clean with none.
+    if u:
+        for pr in rows("""SELECT * FROM finance_providers
+                          WHERE user_id=? AND active=1
+                          AND provider_key NOT IN ('paycheck','plan','savings','cards','bills','randi','reports','money_settings')
+                          ORDER BY sort_order,id""",(u["id"],)):
+            finance_sections.append(f"🧾 {pr['display_name']}")
+    finance_sections += ["🏦 Savings","💳 Cards & Debt","📅 Bills & Spending"]
+    if _is_owner():
+        finance_sections.append("💲 Randi")
+    finance_sections += ["📊 Reports","⚙️ Money Settings"]
     section=st.radio(
         "Finance section",
         finance_sections,
@@ -1823,7 +2168,7 @@ def finances():
         except Exception as _finance_tab_error:
             print('ChapLife Finance tab 6 error:', repr(_finance_tab_error))
             st.warning('This section needs a compatibility update. The rest of Finance is still available from the menu above.')
-    if section=="🤝 Randi":
+    if section=="💲 Randi":
         try:
             st.subheader("🤝 Randi / Protected Money")
             held,owed,physical=roommate_summary()
@@ -1864,6 +2209,8 @@ def finances():
             st.warning('This section needs a compatibility update. The rest of Finance is still available from the menu above.')
     if section=="⚙️ Money Settings":
         try:
+            finance_provider_settings()
+            st.divider()
             st.subheader("⚙️ Money Settings")
             st.caption("Dates display MM/DD/YYYY. Times display with AM/PM.")
             st.markdown("### 🛟 Finance Backup")
