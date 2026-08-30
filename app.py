@@ -13,7 +13,7 @@ DB_PATH = APP_DIR / 'chaplife.db'
 
 st.set_page_config(page_title='ChapLife', page_icon='✨', layout='wide', initial_sidebar_state='collapsed')
 
-BUILD_VERSION='ChapLife 7.0 · Multi-User Preview'
+BUILD_VERSION='ChapLife 7.0.1 · Multi-User Startup Fix'
 
 st.markdown('''
 <style>
@@ -591,7 +591,6 @@ def df_from(query, params=()):
 
 init_db()
 
-ensure_multiuser_seed()
 # ---------- Private Cloud Sync ----------
 def _secret(name, default=""):
     try:
@@ -5669,6 +5668,9 @@ def friendly_app_error(section="this section"):
         st.rerun()
 
 # ---------- Render ----------
+# ChapLife multi-user initialization must run only after all database/cloud helpers exist.
+ensure_multiuser_seed()
+
 page=st.session_state.page
 if page=='Growth Lab' and not bool(get_setting('show_growth_section',False)):
     page='Home'; st.session_state.page='Home'
