@@ -21,7 +21,7 @@ def current_db_path():
 
 st.set_page_config(page_title='ChapLife', page_icon='✨', layout='wide', initial_sidebar_state='collapsed')
 
-BUILD_VERSION='ChapLife 7.2.6 · Owner Access Recovery'
+BUILD_VERSION='ChapLife 7.2.7 · Home Dashboard Fix'
 
 st.markdown('''
 <style>
@@ -2940,7 +2940,13 @@ def home():
     for rowstart in range(0,len(grid),2):
         cc=st.columns(2)
         for j,(ic,p) in enumerate(grid[rowstart:rowstart+2]):
-            lines=insights[p]
+            lines=insights.get(p) or dashboard_details.get(
+                p,["✨ This section is ready","📌 Open it to get started","🔒 Your information stays private"]
+            )
+            # Normalize every dashboard card to exactly three safe lines.
+            lines=list(lines)[:3]
+            while len(lines)<3:
+                lines.append("✨ Open this section to get started")
             label=f"{ic}  {p}\n\n{lines[0]}\n{lines[1]}\n{lines[2]}\n\nOpen →"
             with cc[j]:
                 with st.container(key=f"dashcard_{rowstart}_{j}"):
