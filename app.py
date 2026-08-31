@@ -21,7 +21,7 @@ def current_db_path():
 
 st.set_page_config(page_title='ChapLife', page_icon='✨', layout='wide', initial_sidebar_state='collapsed')
 
-BUILD_VERSION='ChapLife 7.2.13 · Personal Go-To Meals + Google Restaurant Nutrition'
+BUILD_VERSION='ChapLife 7.2.14 · Startup Guard Fix'
 
 # Optional Google lookup keys for restaurant/nutrition tools.
 GOOGLE_MAPS_API_KEY=str(st.secrets.get("GOOGLE_MAPS_API_KEY","") or "").strip()
@@ -3158,10 +3158,11 @@ if _is_owner():
     pages['Career Simulator']='🏗️'
     pages['User Management']='🛡️'
 
-# If an optional section was just turned off, do not leave a hidden page open.
+# Resolve the current page before validating section visibility.
+page=st.session_state.get("page","Home")
 if page not in pages:
     page="Home"
-    st.session_state.page="Home"
+    st.session_state["page"]="Home"
 
 nav_items=list(pages.items())
 for start in range(0,len(nav_items),5):
