@@ -21,7 +21,7 @@ def current_db_path():
 
 st.set_page_config(page_title='ChapLife', page_icon='✨', layout='wide', initial_sidebar_state='collapsed')
 
-BUILD_VERSION='ChapLife 7.2.1 · Simple Access Flow Fix'
+BUILD_VERSION='ChapLife 7.2.2 · Personal Header + Themes'
 
 st.markdown('''
 <style>
@@ -205,6 +205,146 @@ def _is_owner():
 def _safe_display_name(u):
     if not u: return "ChapLife User"
     return u.get("display_name") or u.get("username") or "ChapLife User"
+
+
+def _personal_display_name():
+    u=_current_user()
+    custom=(get_setting("profile_display_name","") or "").strip()
+    if custom:
+        return custom
+    return _safe_display_name(u)
+
+def _theme_palette(theme_name=None):
+    theme=(theme_name or get_setting("profile_theme","Lavender")).strip()
+    palettes={
+        "Lavender":{"accent":"#7C5CFC","accent2":"#B497FF","soft":"#F4F0FF","soft2":"#FCFAFF","text":"#252538","muted":"#686779","ring":"rgba(124,92,252,.22)"},
+        "Ocean":{"accent":"#1479D1","accent2":"#63B8FF","soft":"#EDF7FF","soft2":"#F8FCFF","text":"#1D2B38","muted":"#607080","ring":"rgba(20,121,209,.22)"},
+        "Rose":{"accent":"#C94F7C","accent2":"#F29ABB","soft":"#FFF0F5","soft2":"#FFF9FB","text":"#38242C","muted":"#76616A","ring":"rgba(201,79,124,.22)"},
+        "Emerald":{"accent":"#16876C","accent2":"#65C9AE","soft":"#ECFAF5","soft2":"#F8FDFB","text":"#21352F","muted":"#60746E","ring":"rgba(22,135,108,.22)"},
+        "Sunset":{"accent":"#D96A35","accent2":"#F3A35E","soft":"#FFF4EA","soft2":"#FFFBF7","text":"#39291F","muted":"#78695F","ring":"rgba(217,106,53,.22)"},
+        "Midnight":{"accent":"#4E63D8","accent2":"#8292F2","soft":"#EFF1FF","soft2":"#FAFAFF","text":"#22273B","muted":"#666C82","ring":"rgba(78,99,216,.22)"},
+        "Neutral":{"accent":"#5E6673","accent2":"#9AA2AE","soft":"#F3F5F7","soft2":"#FCFCFD","text":"#292D33","muted":"#6D737C","ring":"rgba(94,102,115,.20)"}
+    }
+    return theme if theme in palettes else "Lavender", palettes.get(theme,palettes["Lavender"])
+
+def apply_personal_theme():
+    theme,p=_theme_palette()
+    st.markdown(f'''
+    <style>
+    :root {{
+        --chap-accent:{p["accent"]};
+        --chap-accent-2:{p["accent2"]};
+        --chap-soft:{p["soft"]};
+        --chap-soft-2:{p["soft2"]};
+        --chap-text:{p["text"]};
+        --chap-muted:{p["muted"]};
+        --chap-ring:{p["ring"]};
+    }}
+    .stApp {{
+        background:
+          radial-gradient(circle at 88% 3%, {p["soft"]} 0, transparent 28%),
+          radial-gradient(circle at 5% 22%, {p["soft2"]} 0, transparent 30%),
+          #ffffff;
+    }}
+    .personal-hero {{
+        width:100%;
+        border:1px solid rgba(130,130,150,.20);
+        border-radius:25px;
+        padding:28px 30px;
+        margin:.2rem 0 1.25rem 0;
+        background:linear-gradient(135deg, rgba(255,255,255,.97), {p["soft"]} 155%);
+        box-shadow:0 18px 46px rgba(35,35,55,.08);
+    }}
+    .personal-hero-inner {{
+        display:flex;
+        align-items:center;
+        gap:19px;
+    }}
+    .personal-avatar {{
+        height:74px;
+        width:74px;
+        flex:0 0 74px;
+        border-radius:50%;
+        overflow:hidden;
+        display:flex;
+        align-items:center;
+        justify-content:center;
+        font-size:30px;
+        font-weight:800;
+        color:white;
+        background:linear-gradient(145deg,{p["accent"]},{p["accent2"]});
+        box-shadow:0 0 0 7px {p["ring"]};
+    }}
+    .personal-avatar img {{
+        width:100%;
+        height:100%;
+        object-fit:cover;
+    }}
+    .personal-title {{
+        margin:0;
+        color:{p["text"]};
+        font-size:2.05rem;
+        line-height:1.05;
+        font-weight:820;
+        letter-spacing:-.025em;
+    }}
+    .personal-subtitle {{
+        color:{p["muted"]};
+        margin:.55rem 0 0 0;
+        font-size:1.02rem;
+    }}
+    .personal-theme-chip {{
+        display:inline-block;
+        margin-top:.65rem;
+        padding:.22rem .62rem;
+        border-radius:999px;
+        background:{p["soft"]};
+        color:{p["accent"]};
+        border:1px solid {p["ring"]};
+        font-size:.78rem;
+        font-weight:700;
+    }}
+    div[data-testid="stButton"] button:hover,
+    div[data-testid="stFormSubmitButton"] button:hover {{
+        border-color:{p["accent"]} !important;
+        box-shadow:0 8px 22px {p["ring"]} !important;
+    }}
+    .stProgress > div > div > div > div {{
+        background-color:{p["accent"]} !important;
+    }}
+    a {{ color:{p["accent"]}; }}
+    @media(max-width:640px) {{
+        .personal-hero {{ padding:22px 18px; border-radius:21px; }}
+        .personal-avatar {{ width:62px;height:62px;flex-basis:62px;font-size:25px; }}
+        .personal-title {{ font-size:1.68rem; }}
+        .personal-subtitle {{ font-size:.93rem; }}
+    }}
+    </style>
+    ''',unsafe_allow_html=True)
+
+def personal_header():
+    u=_current_user()
+    name=_personal_display_name()
+    theme,_=_theme_palette()
+    photo=(u or {}).get("profile_photo") or ""
+    if photo:
+        avatar=f'<div class="personal-avatar"><img src="{html.escape(photo,quote=True)}" alt="Profile picture"></div>'
+    else:
+        initial=html.escape((name[:1] if name else "C").upper())
+        avatar=f'<div class="personal-avatar">{initial}</div>'
+    st.markdown(
+        f'''<div class="personal-hero">
+              <div class="personal-hero-inner">
+                {avatar}
+                <div>
+                  <h1 class="personal-title">{html.escape(name)}</h1>
+                  <p class="personal-subtitle">Track it • save it • see your progress • build a healthier, stronger life.</p>
+                  <span class="personal-theme-chip">{html.escape(theme)} theme</span>
+                </div>
+              </div>
+            </div>''',
+        unsafe_allow_html=True
+    )
 
 def _provider_name(provider_key, fallback):
     u=_current_user()
@@ -554,7 +694,7 @@ def user_access_center():
         return
     is_member=bool(st.session_state.get("_chaplife_member_id"))
 
-    st.write("This information helps ChapLife personalize workouts, health tools, food planning, and recommendations.")
+    st.write("Make ChapLife feel like yours. Your photo, display name, and color theme are personal to your account.")
 
     st.subheader("About Me")
     c=st.columns([1,2])
@@ -583,7 +723,14 @@ def user_access_center():
         activity_saved=get_setting("profile_activity_level","")
 
         with st.form("profile_form"):
-            display=st.text_input("Name / display name",value=u.get("display_name") or "")
+            st.text_input("Account name",value=u.get("display_name") or "",disabled=True,
+                          help="This is the name tied to your ChapLife access.")
+            display=st.text_input(
+                "Display name (optional)",
+                value=get_setting("profile_display_name",""),
+                placeholder="What should ChapLife call you?",
+                help="Leave this blank and ChapLife will use your account name."
+            )
             username=st.text_input("Username (optional)",value=u.get("username") or "",
                                    help="If blank, you can use your full name when signing in.")
             gender=st.selectbox("Gender",gender_opts,index=gender_idx)
@@ -598,6 +745,15 @@ def user_access_center():
                                   index=activity_opts.index(activity_saved) if activity_saved in activity_opts else 0)
             workout_goal=st.text_input("Main fitness / workout goal",value=workout_goal_saved,
                                        placeholder="Lose weight, build strength, improve stamina…")
+
+            theme_opts=["Lavender","Ocean","Rose","Emerald","Sunset","Midnight","Neutral"]
+            current_theme=get_setting("profile_theme","Lavender")
+            theme=st.selectbox(
+                "My ChapLife color theme",
+                theme_opts,
+                index=theme_opts.index(current_theme) if current_theme in theme_opts else 0,
+                help="This changes only your ChapLife. Other people keep their own theme."
+            )
             bio=st.text_area("Short bio (optional)",value=u.get("bio") or "",height=90)
             visible=st.toggle("Allow my profile to be visible in future social features",
                               value=bool(u.get("profile_visible",False)))
@@ -614,15 +770,16 @@ def user_access_center():
                                 st.error("That username is already being used.")
                                 st.stop()
                         updated=_central_update_member(u["id"],{
-                            "display_name":display.strip(),"normalized_name":_norm_name(display),
                             "username":uname,"bio":bio,"profile_visible":bool(visible),
                             "updated_at":datetime.now().isoformat(timespec="seconds")
                         })
                         if updated: st.session_state["_chaplife_member_profile"]=updated[0]
                     else:
-                        execute("""UPDATE app_users SET display_name=?,username=?,bio=?,profile_visible=?,updated_at=? WHERE id=?""",
-                                (display,username.strip() or None,bio,1 if visible else 0,
+                        execute("""UPDATE app_users SET username=?,bio=?,profile_visible=?,updated_at=? WHERE id=?""",
+                                (username.strip() or None,bio,1 if visible else 0,
                                  datetime.now().isoformat(timespec="seconds"),u["id"]))
+                    set_setting("profile_display_name",display.strip())
+                    set_setting("profile_theme",theme)
                     set_setting("profile_gender",gender_custom.strip() if gender=="Custom" and gender_custom.strip() else gender)
                     set_setting("profile_birthdate",birthdate.strip())
                     set_setting("profile_height",height.strip())
@@ -1688,6 +1845,8 @@ def cloud_auth_gate():
 
 cloud_auth_gate()
 
+apply_personal_theme()
+
 # Cloud sync continues silently after sign-in.
 if hasattr(st, "fragment"):
     @st.fragment(run_every=120)
@@ -2043,7 +2202,7 @@ def _dashboard_insights():
     }
 
 def home():
-    st.markdown('<div class="hero"><h1>✨ ChapLife</h1><p>Track it • save it • see your progress • build a healthier, stronger life.</p></div>',unsafe_allow_html=True)
+    personal_header()
 
     today=date.today().isoformat()
     water=sum(r['ounces'] for r in rows('SELECT ounces FROM water_log WHERE log_date=?',(today,)))
@@ -2060,7 +2219,7 @@ def home():
     st.subheader('My dashboard')
     insights=_dashboard_insights()
     grid=[
-        ('💰','Finances'),('🥗','Food & Nutrition'),('🛒','Grocery Shopping'),
+        ('💰','Finances'),('✈️','Trips'),('🥗','Food & Nutrition'),('🛒','Grocery Shopping'),
         ('🏋🏾‍♀️','My Trainer'),('💧','Water & Jug Puzzles'),('📖','Vocabulary'),
         ('🏗️','Career Simulator'),('❤️','Health & Life')
     ]
