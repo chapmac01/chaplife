@@ -21,7 +21,7 @@ def current_db_path():
 
 st.set_page_config(page_title='ChapLife', page_icon='✨', layout='wide', initial_sidebar_state='collapsed')
 
-BUILD_VERSION='ChapLife 7.2.9 · Finance Provider Routing Fix'
+BUILD_VERSION='ChapLife 7.2.10 · Full Affirm Klarna Wallet Restore'
 
 st.markdown('''
 <style>
@@ -3683,65 +3683,240 @@ def _command_center(p):
     return s
 
 def _render_provider_wallet(provider,keyprefix):
+    # Always show the top summary, but never let one optional wallet tool
+    # prevent the accounts/payment schedule below from rendering.
     p,_=_paycheck_selector(f"{keyprefix}_impact",f"Show {provider} impact for paycheck")
     pid=p["id"] if p else None
-    bal,blim,plim,upcoming=bnpl_provider_summary(provider,pid)
+
+    try:
+        bal,blim,plim,upcoming=bnpl_provider_summary(provider,pid)
+    except Exception as err:
+        print(f"ChapLife {provider} summary error:",repr(err))
+        # Fallback directly from purchases/installments.
+        try:
+            rr=rows("""SELECT COALESCE(SUM(remaining_balance),0) AS x
+                       FROM bnpl_purchases
+                       WHERE provider=? AND COALESCE(status,'Active')='Active'""",(provider,))
+            bal=float(rr[0]["x"] or 0) if rr else 0.0
+        except Exception:
+            bal=0.0
+        blim=plim=upcoming=0.0
+
     c=st.columns(4)
     c[0].metric("Active balance",money(bal))
     c[1].metric("Due from selected check",money(upcoming))
     c[2].metric("My balance limit",money(blim) if blim else "Not set")
     c[3].metric("Available under my limit",money(max(0,blim-bal)) if blim else "—")
-    st.write(_bnpl_risk(bal,blim))
+    try:
+        risk=_bnpl_risk(bal,blim)
+        if risk:
+            st.write(risk)
+    except Exception:
+        pass
 
-    current=rows("SELECT * FROM finance_limits WHERE provider=?",(provider,))
-    bl=float(current[0]["balance_limit"] or 0) if current else 0
-    pl=float(current[0]["paycheck_limit"] or 0) if current else 0
-    with st.expander("⚙️ My spending limits"):
-        c=st.columns(3)
-        nbl=c[0].number_input("Max total balance",min_value=0.0,value=bl,step=25.0,key=f"{keyprefix}_blim")
-        npl=c[1].number_input("Max from one paycheck",min_value=0.0,value=pl,step=10.0,key=f"{keyprefix}_plim")
-        if c[2].button("Save limits",key=f"{keyprefix}_save_limits"):
-            execute("""INSERT INTO finance_limits(provider,balance_limit,paycheck_limit) VALUES(?,?,?)
-                       ON CONFLICT(provider) DO UPDATE SET balance_limit=excluded.balance_limit,paycheck_limit=excluded.paycheck_limit""",
-                    (provider,nbl,npl)); st.rerun()
+    # ---------------- Spending limits ----------------
+    try:
+        current=rows("SELECT * FROM finance_limits WHERE provider=?",(provider,))
+        bl=float(current[0]["balance_limit"] or 0) if current else 0.0
+        pl=float(current[0]["paycheck_limit"] or 0) if current else 0.0
+        with st.expander("⚙️ My spending limits"):
+            c=st.columns(3)
+            nbl=c[0].number_input(
+                "Max total balance",min_value=0.0,value=bl,step=25.0,
+                key=f"{keyprefix}_blim"
+            )
+            npl=c[1].number_input(
+                "Max from one paycheck",min_value=0.0,value=pl,step=10.0,
+                key=f"{keyprefix}_plim"
+            )
+            if c[2].button("Save limits",key=f"{keyprefix}_save_limits"):
+                execute(
+                    """INSERT INTO finance_limits(provider,balance_limit,paycheck_limit)
+                       VALUES(?,?,?)
+                       ON CONFLICT(provider) DO UPDATE SET
+                         balance_limit=excluded.balance_limit,
+                         paycheck_limit=excluded.paycheck_limit""",
+                    (provider,nbl,npl)
+                )
+                st.rerun()
+    except Exception as err:
+        print(f"ChapLife {provider} limits error:",repr(err))
+        st.caption("Spending limits are temporarily unavailable, but your accounts are still below.")
 
+    # ---------------- Add purchase ----------------
     st.markdown(f"### ➕ Add {provider} purchase")
-    with st.form(f"{keyprefix}_add",clear_on_submit=True):
-        c=st.columns(3)
-        merchant=c[0].text_input("Store / purchase")
-        total=c[1].number_input("Original total",min_value=0.0,step=5.0)
-        apr=c[2].number_input("APR % (if available)",min_value=0.0,max_value=100.0,step=.01)
-        c=st.columns(4)
-        pdte=c[0].date_input("Purchase date",date.today(),format="MM/DD/YYYY")
-        freq=c[1].selectbox("Payments",["Every 2 weeks","Monthly","Weekly"])
-        count=c[2].number_input("# payments",1,36,4)
-        first=c[3].date_input("First payment",date.today(),format="MM/DD/YYYY")
-        famt=st.number_input("First payment amount (0 = split evenly)",min_value=0.0,step=5.0)
-        if st.form_submit_button(f"Add {provider} purchase",use_container_width=True):
-            create_bnpl_purchase(provider,merchant,pdte,total,freq,count,first,famt,"")
-            newest=rows("SELECT id FROM bnpl_purchases WHERE provider=? ORDER BY id DESC LIMIT 1",(provider,))
-            if newest: execute("UPDATE bnpl_purchases SET apr=? WHERE id=?",(float(apr),newest[0]["id"]))
-            st.rerun()
+    try:
+        with st.form(f"{keyprefix}_add_purchase",clear_on_submit=True):
+            c=st.columns(3)
+            merchant=c[0].text_input("Store / purchase",key=f"{keyprefix}_merchant")
+            total=c[1].number_input(
+                "Original total",min_value=0.0,step=5.0,key=f"{keyprefix}_total"
+            )
+            apr=c[2].number_input(
+                "APR % (if available)",min_value=0.0,max_value=100.0,
+                step=0.01,key=f"{keyprefix}_new_apr"
+            )
+            c=st.columns(4)
+            pdte=c[0].date_input(
+                "Purchase date",date.today(),format="MM/DD/YYYY",
+                key=f"{keyprefix}_purchase_date"
+            )
+            freq=c[1].selectbox(
+                "Payments",["Every 2 weeks","Monthly","Weekly"],
+                key=f"{keyprefix}_frequency"
+            )
+            count=int(c[2].number_input(
+                "# payments",min_value=1,max_value=36,value=4,step=1,
+                key=f"{keyprefix}_payment_count"
+            ))
+            first=c[3].date_input(
+                "First payment",date.today(),format="MM/DD/YYYY",
+                key=f"{keyprefix}_first_payment"
+            )
+            famt=st.number_input(
+                "First payment amount (0 = split evenly)",
+                min_value=0.0,step=5.0,key=f"{keyprefix}_first_amount"
+            )
+            submitted=st.form_submit_button(
+                f"Add {provider} purchase",use_container_width=True
+            )
+            if submitted:
+                if not merchant.strip():
+                    st.warning("Add the store or purchase name.")
+                elif total<=0:
+                    st.warning("Add the purchase total.")
+                else:
+                    create_bnpl_purchase(
+                        provider,merchant.strip(),pdte,total,freq,count,first,famt,""
+                    )
+                    newest=rows(
+                        "SELECT id FROM bnpl_purchases WHERE provider=? ORDER BY id DESC LIMIT 1",
+                        (provider,)
+                    )
+                    if newest:
+                        try:
+                            execute(
+                                "UPDATE bnpl_purchases SET apr=? WHERE id=?",
+                                (float(apr),newest[0]["id"])
+                            )
+                        except Exception:
+                            pass
+                    st.rerun()
+    except Exception as err:
+        print(f"ChapLife {provider} add-purchase form error:",repr(err))
+        st.warning(
+            f"The Add {provider} purchase form needs a compatibility fix, "
+            "but your saved accounts are still shown below."
+        )
 
-    active=rows("SELECT * FROM bnpl_purchases WHERE provider=? AND status='Active' ORDER BY merchant",(provider,))
+    # ---------------- Existing accounts ----------------
     st.markdown(f"### {provider} accounts")
+    try:
+        active=rows(
+            """SELECT * FROM bnpl_purchases
+               WHERE provider=? AND COALESCE(status,'Active')='Active'
+               ORDER BY merchant,id""",
+            (provider,)
+        )
+    except Exception as err:
+        print(f"ChapLife {provider} account query error:",repr(err))
+        try:
+            active=rows(
+                "SELECT * FROM bnpl_purchases WHERE provider=? ORDER BY merchant,id",
+                (provider,)
+            )
+        except Exception:
+            active=[]
+
     if not active:
         st.caption(f"No active {provider} accounts.")
+        return
+
     for bp in active:
         bid=bp["id"]
-        with st.expander(f"{bp['merchant']} · {money(bp['remaining_balance'])} remaining"):
-            c=st.columns(3)
-            orig=c[0].number_input("Original balance",min_value=0.0,value=float(bp["original_amount"] or 0),step=5.0,key=f"{keyprefix}_orig_{bid}")
-            remain=c[1].number_input("Current balance",min_value=0.0,value=float(bp["remaining_balance"] or 0),step=5.0,key=f"{keyprefix}_rem_{bid}")
-            aprv=c[2].number_input("APR %",min_value=0.0,max_value=100.0,value=float(bp["apr"] or 0) if "apr" in bp.keys() else 0.0,step=.01,key=f"{keyprefix}_apr_{bid}")
-            if st.button("💾 Save Changes",key=f"{keyprefix}_save_{bid}",use_container_width=True):
-                execute("UPDATE bnpl_purchases SET original_amount=?,remaining_balance=?,apr=? WHERE id=?",(orig,remain,aprv,bid)); st.rerun()
-            sched=df_from("SELECT due_date,amount,status,paid_date FROM bnpl_installments WHERE purchase_id=? ORDER BY due_date",(bid,))
-            if not sched.empty: st.dataframe(display_df_us(sched),use_container_width=True,hide_index=True)
+        merchant_name=bp["merchant"] or f"{provider} purchase"
+        remaining=float(bp["remaining_balance"] or 0) if "remaining_balance" in bp.keys() else 0.0
+        with st.expander(f"{merchant_name} · {money(remaining)} remaining"):
+            # Editable account summary.
+            try:
+                c=st.columns(3)
+                orig=c[0].number_input(
+                    "Original balance",
+                    min_value=0.0,
+                    value=float(bp["original_amount"] or 0) if "original_amount" in bp.keys() else 0.0,
+                    step=5.0,
+                    key=f"{keyprefix}_orig_{bid}"
+                )
+                remain=c[1].number_input(
+                    "Current balance",
+                    min_value=0.0,
+                    value=remaining,
+                    step=5.0,
+                    key=f"{keyprefix}_rem_{bid}"
+                )
+                aprv=c[2].number_input(
+                    "APR %",
+                    min_value=0.0,max_value=100.0,
+                    value=float(bp["apr"] or 0) if "apr" in bp.keys() else 0.0,
+                    step=0.01,
+                    key=f"{keyprefix}_apr_{bid}"
+                )
+                if st.button(
+                    "💾 Save Changes",
+                    key=f"{keyprefix}_save_{bid}",
+                    use_container_width=True
+                ):
+                    execute(
+                        """UPDATE bnpl_purchases
+                           SET original_amount=?,remaining_balance=?,apr=?
+                           WHERE id=?""",
+                        (orig,remain,aprv,bid)
+                    )
+                    st.rerun()
+            except Exception as err:
+                print(f"ChapLife {provider} account edit error {bid}:",repr(err))
+                st.write(f"Current balance: **{money(remaining)}**")
 
+            # Payment schedule: adapt to whatever columns this older DB has.
+            st.markdown("**Payment schedule**")
+            try:
+                cols={r["name"] for r in rows("PRAGMA table_info(bnpl_installments)")}
+                select_cols=["due_date","amount","status"]
+                if "paid_date" in cols:
+                    select_cols.append("paid_date")
+                if "paycheck_id" in cols:
+                    select_cols.append("paycheck_id")
+                sched=df_from(
+                    f"""SELECT {','.join(select_cols)}
+                        FROM bnpl_installments
+                        WHERE purchase_id=?
+                        ORDER BY due_date,id""",
+                    (bid,)
+                )
+                if sched.empty:
+                    st.caption("No installment schedule saved for this account.")
+                else:
+                    st.dataframe(
+                        display_df_us(sched),
+                        use_container_width=True,
+                        hide_index=True
+                    )
+            except Exception as err:
+                print(f"ChapLife {provider} schedule error {bid}:",repr(err))
+                st.caption("The payment schedule could not be displayed, but the account is still saved.")
+
+            # Account deletion remains explicit and account-scoped.
             st.markdown("**Delete account**")
-            confirm=st.checkbox(f"I want to permanently delete {provider} · {bp['merchant']} and its payment schedule.",key=f"{keyprefix}_delconfirm_{bid}")
-            if st.button("🗑️ Delete Account",key=f"{keyprefix}_delete_{bid}",disabled=not confirm,use_container_width=True):
+            confirm=st.checkbox(
+                f"I want to permanently delete {provider} · {merchant_name} and its payment schedule.",
+                key=f"{keyprefix}_delconfirm_{bid}"
+            )
+            if st.button(
+                "🗑️ Delete Account",
+                key=f"{keyprefix}_delete_{bid}",
+                disabled=not confirm,
+                use_container_width=True
+            ):
                 execute("DELETE FROM bnpl_installments WHERE purchase_id=?",(bid,))
                 execute("DELETE FROM bnpl_purchases WHERE id=?",(bid,))
                 st.success("Account deleted and Finance totals recalculated.")
@@ -3754,6 +3929,13 @@ def ensure_finance_schema():
         ("bnpl_purchases","apr","REAL DEFAULT 0"),
         ("bnpl_purchases","status","TEXT DEFAULT 'Active'"),
         ("bnpl_purchases","remaining_balance","REAL DEFAULT 0"),
+        ("bnpl_purchases","provider","TEXT"),
+        ("bnpl_purchases","merchant","TEXT"),
+        ("bnpl_purchases","original_amount","REAL DEFAULT 0"),
+        ("bnpl_purchases","purchase_date","TEXT"),
+        ("bnpl_installments","due_date","TEXT"),
+        ("bnpl_installments","amount","REAL DEFAULT 0"),
+        ("bnpl_installments","status","TEXT DEFAULT 'Planned'"),
         ("bnpl_installments","paid_date","TEXT"),
         ("bnpl_installments","paycheck_id","INTEGER"),
         ("paycheck_plan_items","paid_date","TEXT"),
