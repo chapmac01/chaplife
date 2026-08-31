@@ -1401,7 +1401,7 @@ def trips_page():
     tabs=st.tabs(["💡 Ideas","🗳️ Decisions","💰 Final Trip Cost","💵 My Budget & Savings"])
 
     # ----------------------- IDEAS -----------------------
-    with tabs[1]:
+    with tabs[0]:
         if _shared_trip_can_suggest(trip,actor):
             with st.form(f"shared_option_form_{trip['id']}",clear_on_submit=True):
                 cat=st.selectbox(
@@ -1543,7 +1543,7 @@ def trips_page():
                         st.rerun()
 
     # ----------------------- DECISIONS -----------------------
-    with tabs[2]:
+    with tabs[1]:
         options=_shared_trip_options(trip["id"])
         if not options:
             st.caption("No options to compare yet.")
@@ -1566,7 +1566,7 @@ def trips_page():
             st.dataframe(pd.DataFrame(data),hide_index=True,use_container_width=True)
 
     # ----------------------- FINAL GROUP COST -----------------------
-    with tabs[3]:
+    with tabs[2]:
         items=_shared_trip_budget_items(trip["id"])
         if not items:
             st.caption("Finalized trip choices will appear here.")
@@ -1602,7 +1602,7 @@ def trips_page():
             st.caption(f"Current equal-share estimate: ${final_total/max(1,people):,.2f} each across {people} traveler(s).")
 
     # ----------------------- PRIVATE MONEY CHOICE -----------------------
-    with tabs[4]:
+    with tabs[3]:
         st.markdown("### Your private trip money plan")
         st.caption(
             "Only you can see what you connect to your Finance section. "
@@ -5379,6 +5379,8 @@ def food():
                         (date.today().isoformat(),'Other',item,cal,prot,source,selected_place,'',f'{custom} {note}'.strip())
                     )
                     st.rerun()
+
+STORES=['Aldi','ShopRite','Stop & Shop','Target','Walmart','Whole Foods Market','Trader Joe’s','Key Food','Food Bazaar','Costco','BJ’s Wholesale Club','Other']
 
 def grocery():
     st.title('🛒 Grocery Shopping')
