@@ -21,7 +21,7 @@ def current_db_path():
 
 st.set_page_config(page_title='ChapLife', page_icon='✨', layout='wide', initial_sidebar_state='collapsed')
 
-BUILD_VERSION='ChapLife 7.2.14 · Startup Guard Fix'
+BUILD_VERSION='LifeMode 7.2.15 · Member Feature Access Fix'
 
 # Optional Google lookup keys for restaurant/nutrition tools.
 GOOGLE_MAPS_API_KEY=str(st.secrets.get("GOOGLE_MAPS_API_KEY","") or "").strip()
@@ -755,7 +755,7 @@ def _trip_calendar_dates(trip):
     return start,end
 
 def _trip_calendar_description(trip):
-    bits=["Shared ChapLife trip"]
+    bits=["Shared LifeMode trip"]
     if trip.get("destination"):
         bits.append("Destination: "+str(trip.get("destination")))
     if trip.get("departure_city"):
@@ -775,7 +775,7 @@ def _trip_google_calendar_url(trip):
         return ""
     # Google all-day events use an exclusive end date.
     end_exclusive=end+timedelta(days=1)
-    title=str(trip.get("name") or "ChapLife Trip")
+    title=str(trip.get("name") or "LifeMode Trip")
     details=_trip_calendar_description(trip)
     location=str(trip.get("destination") or "")
     params={
@@ -801,7 +801,7 @@ def _trip_ics_bytes(trip):
     if not start:
         return b""
     end_exclusive=end+timedelta(days=1)
-    title=_ics_escape(trip.get("name") or "ChapLife Trip")
+    title=_ics_escape(trip.get("name") or "LifeMode Trip")
     desc=_ics_escape(_trip_calendar_description(trip))
     location=_ics_escape(trip.get("destination") or "")
     uid=f"chaplife-trip-{trip.get('id')}@chaplife"
@@ -828,7 +828,7 @@ def _trip_ics_bytes(trip):
     return ics.encode("utf-8")
 
 def _safe_calendar_filename(trip):
-    raw=str(trip.get("name") or "ChapLife Trip")
+    raw=str(trip.get("name") or "LifeMode Trip")
     safe=re.sub(r"[^A-Za-z0-9 _-]+","",raw).strip().replace(" ","_")
     return (safe or "ChapLife_Trip")+".ics"
 
@@ -840,9 +840,9 @@ def _transfer_shared_trip_ownership(trip, new_owner_member):
         raise PermissionError("Only the current trip creator can transfer ownership.")
 
     new_member_id=str(new_owner_member.get("member_id") or "")
-    new_name=str(new_owner_member.get("member_name") or "ChapLife user").strip()
+    new_name=str(new_owner_member.get("member_name") or "LifeMode user").strip()
     if not new_member_id:
-        raise ValueError("Choose a ChapLife member who is already on the trip.")
+        raise ValueError("Choose a LifeMode member who is already on the trip.")
 
     old_owner_ref=str(trip.get("owner_ref") or "")
     retained=trip.get("retained_viewer_refs") or []
@@ -899,7 +899,7 @@ def _transfer_shared_trip_ownership(trip, new_owner_member):
                 {"role":"Member"}
             )
 
-    # The owner_ref for regular ChapLife users is their member UUID.
+    # The owner_ref for regular LifeMode users is their member UUID.
     _shared_patch(
         "chaplife_shared_trips",
         "id=eq."+urllib.parse.quote(str(trip["id"])),
@@ -1186,7 +1186,7 @@ def trips_page():
             if owner_view:
                 st.markdown("#### Who can see this trip")
                 st.caption(
-                    "Invite people who already have an approved ChapLife account. "
+                    "Invite people who already have an approved LifeMode account. "
                     "Once added, the trip appears in their Trips section."
                 )
 
@@ -1200,7 +1200,7 @@ def trips_page():
 
                 current_member_ids={str(m.get("member_id")) for m in members if m.get("member_id")}
                 choices={
-                    str(m["id"]):(m.get("display_name") or m.get("username") or "ChapLife user")
+                    str(m["id"]):(m.get("display_name") or m.get("username") or "LifeMode user")
                     for m in approved
                     if str(m["id"])!=str(actor.get("member_id") or "")
                     and str(m["id"]) not in current_member_ids
@@ -1236,7 +1236,7 @@ def trips_page():
                 for m in members:
                     cols=st.columns([3,1,1])
                     crown="👑 " if m.get("role")=="Owner" else ""
-                    cols[0].write(f"{crown}{m.get('member_name') or 'ChapLife user'} · {m.get('rsvp') or 'Invited'}")
+                    cols[0].write(f"{crown}{m.get('member_name') or 'LifeMode user'} · {m.get('rsvp') or 'Invited'}")
                     if m.get("role")!="Owner":
                         if cols[1].button("Remove",key=f"remove_shared_member_{trip['id']}_{m['member_id']}"):
                             _shared_delete(
@@ -1305,7 +1305,7 @@ def trips_page():
                 ]
                 if transferable:
                     transfer_map={
-                        str(m["member_id"]):m.get("member_name") or "ChapLife user"
+                        str(m["member_id"]):m.get("member_name") or "LifeMode user"
                         for m in transferable
                     }
                     new_owner_id=st.selectbox(
@@ -1336,7 +1336,7 @@ def trips_page():
                         st.success(f"{target.get('member_name') or 'The selected member'} is now the trip owner.")
                         st.rerun()
                 else:
-                    st.caption("Add another ChapLife user to this trip before transferring ownership.")
+                    st.caption("Add another LifeMode user to this trip before transferring ownership.")
 
                 st.divider()
                 st.markdown("#### 🗑️ Delete trip")
@@ -1467,7 +1467,7 @@ def trips_page():
                         st.write(f"Estimated cost: **${(high or low):,.2f}** · {o.get('price_basis') or 'Total'}")
                 if o.get("notes"):
                     st.caption(o["notes"])
-                st.caption(f"Suggested by {o.get('suggested_by_name') or 'ChapLife user'}")
+                st.caption(f"Suggested by {o.get('suggested_by_name') or 'LifeMode user'}")
 
                 c=st.columns([1,2,1])
                 if c[0].button("✓ Voted" if myvote and myvote.get("vote") else "👍 Vote",key=f"shared_vote_{o['id']}"):
@@ -1757,7 +1757,7 @@ def user_access_center():
 
         with st.form("profile_form"):
             st.text_input("Account name",value=u.get("display_name") or "",disabled=True,
-                          help="This is the name tied to your ChapLife access.")
+                          help="This is the name tied to your LifeMode access.")
             display=st.text_input(
                 "Display name (optional)",
                 value=get_setting("profile_display_name",""),
@@ -1864,7 +1864,7 @@ def user_access_center():
     if is_member:
         st.divider()
         st.subheader("Delete My Account")
-        st.caption("This permanently removes your ChapLife account and private cloud data.")
+        st.caption("This permanently removes your LifeMode account and private cloud data.")
         typed=st.text_input("Type DELETE to confirm",key="self_delete_text")
         if st.button("Delete My Account",disabled=typed.strip().upper()!="DELETE",
                      use_container_width=True,key="delete_self_account"):
@@ -1889,7 +1889,7 @@ def feature_request_center(embedded=False):
         current=st.text_area("What happens now?",height=75)
         desired=st.text_area("Exactly what should happen instead?",height=110)
         trigger=st.text_area("What should happen after you click / enter / save something?",height=90)
-        visibility=st.selectbox("Who should be able to see it?",["Only me","People I invite","Everyone in a shared space","All ChapLife users","Owner/admin only"])
+        visibility=st.selectbox("Who should be able to see it?",["Only me","People I invite","Everyone in a shared space","All LifeMode users","Owner/admin only"])
         inputs=st.text_area("What information should ChapLife ask you for?",height=90)
         details=st.text_area("Anything else that matters? Include examples, calculations, rules, wording, colors, or layout.",height=120)
         priority=st.selectbox("How important is this to you?",["Low","Normal","High"])
@@ -2082,7 +2082,7 @@ def owner_user_management():
         st.divider()
         st.subheader("Feature Requests")
         for r in reqs:
-            with st.expander(f"{r.get('area')} · {r.get('display_name') or 'ChapLife user'} · {r.get('status')}"):
+            with st.expander(f"{r.get('area')} · {r.get('display_name') or 'LifeMode user'} · {r.get('status')}"):
                 st.write(r.get("goal") or "")
                 st.caption(r.get("details") or "")
                 statuses=["Submitted","Reviewing","Planned","Added","Can't Add"]
@@ -2713,7 +2713,7 @@ def cloud_auth_gate():
         )
 
         if not MULTIUSER_CONFIGURED:
-            st.warning("ChapLife member access still needs the multi-user Supabase setup.")
+            st.warning("LifeMode member access still needs the multi-user Supabase setup.")
             st.stop()
 
         mode=st.segmented_control(
@@ -2731,12 +2731,12 @@ def cloud_auth_gate():
                     placeholder="Your full name, username, or email"
                 )
                 password=st.text_input("Password",type="password")
-                go=st.form_submit_button("Enter ChapLife",use_container_width=True)
+                go=st.form_submit_button("Enter LifeMode",use_container_width=True)
                 if go:
                     login_value=str(login or "").strip()
                     person=_central_member_by_name_or_username(login_value)
 
-                    # Normal ChapLife member sign-in.
+                    # Normal LifeMode member sign-in.
                     if person:
                         if person.get("status")=="pending":
                             st.info("Your access request is still waiting for approval.")
@@ -3143,23 +3143,29 @@ pages = {
  'My Progress':'📈', 'Settings':'⚙️', 'Profile':'👤'
 }
 
-# Optional sections for regular members live in Settings → Extra Features.
-if _extra_feature_enabled('water_jugs'):
-    pages['Water & Jug Puzzles']='💧'
-if _extra_feature_enabled('vocabulary'):
-    pages['Vocabulary']='📖'
-if _extra_feature_enabled('growth'):
-    pages['Growth Lab']='🌱'
-if _extra_feature_enabled('conversation'):
-    pages['Conversation & Current Events']='💬'
-
-# Owner-only tools never appear for regular member accounts.
+# Member access policy:
+# - Vocabulary and Conversation are optional, OFF until that member enables them.
+# - Growth Lab and Career Simulator are owner-only and never appear for members.
 if _is_owner():
+    pages['Water & Jug Puzzles']='💧'
+    pages['Vocabulary']='📖'
+    pages['Growth Lab']='🌱'
+    pages['Conversation & Current Events']='💬'
     pages['Career Simulator']='🏗️'
     pages['User Management']='🛡️'
+else:
+    pages['Water & Jug Puzzles']='💧'
+    if bool(get_setting('extra_feature_vocabulary',False)):
+        pages['Vocabulary']='📖'
+    if bool(get_setting('extra_feature_conversation',False)):
+        pages['Conversation & Current Events']='💬'
 
 # Resolve the current page before validating section visibility.
 page=st.session_state.get("page","Home")
+# Never allow a regular member to reach owner-only sections through stale session state.
+if not _is_owner() and page in ("Growth Lab","Career Simulator","User Management"):
+    page="Home"
+    st.session_state["page"]="Home"
 if page not in pages:
     page="Home"
     st.session_state["page"]="Home"
@@ -3311,16 +3317,17 @@ def home():
         ('💰','Finances'),('✈️','Trips'),('🥗','Food & Nutrition'),
         ('🛒','Grocery Shopping'),('🏋🏾‍♀️','My Trainer'),('❤️','Health & Life')
     ]
-    if _extra_feature_enabled('water_jugs'):
-        grid.append(('💧','Water & Jug Puzzles'))
-    if _extra_feature_enabled('vocabulary'):
-        grid.append(('📖','Vocabulary'))
-    if _extra_feature_enabled('growth'):
-        grid.append(('🌱','Growth Lab'))
-    if _extra_feature_enabled('conversation'):
-        grid.append(('💬','Conversation & Current Events'))
+    grid.append(('💧','Water & Jug Puzzles'))
     if _is_owner():
+        grid.append(('📖','Vocabulary'))
+        grid.append(('🌱','Growth Lab'))
+        grid.append(('💬','Conversation & Current Events'))
         grid.append(('🏗️','Career Simulator'))
+    else:
+        if bool(get_setting('extra_feature_vocabulary',False)):
+            grid.append(('📖','Vocabulary'))
+        if bool(get_setting('extra_feature_conversation',False)):
+            grid.append(('💬','Conversation & Current Events'))
 
     st.markdown("""
     <style>
@@ -7928,7 +7935,7 @@ def settings_page():
     st.title('⚙️ Settings')
 
     st.subheader("🎨 Appearance")
-    st.caption("Choose how your ChapLife looks. This only changes your account.")
+    st.caption("Choose how your LifeMode looks. This only changes your account.")
     theme_opts=["Lavender","Ocean","Rose","Emerald","Sunset","Midnight","Neutral"]
     current_theme=get_setting("profile_theme","Lavender")
     theme_preview={
@@ -7949,14 +7956,12 @@ def settings_page():
     with tabs[0]:
         st.subheader("➕ Extra Features")
         if _is_owner():
-            st.info("Your owner account keeps your full ChapLife feature set automatically.")
-            st.write("**Always on for you:** Vocabulary, Water & Jug Puzzles, Growth Lab, Conversation & Current Events, Herbalife Bar, Overnight Oats, and Career Simulator.")
+            st.info("Your owner account keeps the full LifeMode feature set automatically.")
+            st.write("**Owner access:** Vocabulary, Water & Jug Puzzles, Growth Lab, Conversation & Current Events, Herbalife Bar, Overnight Oats, and Career Simulator.")
         else:
-            st.write("Turn on only the extra tools you want. Turning one off hides it without deleting what you saved.")
+            st.write("Turn on only the extra tools you want. Turning one off hides it without deleting what you saved. Growth Lab and Career Simulator are not available on member accounts.")
             extras=[
-                ("water_jugs","💧 Water & Jug Puzzles","Water tracking plus the jug puzzle game."),
                 ("vocabulary","📖 Vocabulary","Vocabulary practice, recall, pronunciation, and saved progress."),
-                ("growth","🌱 Growth Lab","Personal growth exercises and practice."),
                 ("conversation","💬 Conversation & Current Events","Conversation practice and current-events confidence tools."),
                 ("herbalife","🥤 Herbalife Bar","Herbalife product library and Herbalife-specific go-to shake tools."),
                 ("overnight_oats","🫙 Overnight Oats","Starter overnight-oats recipe and meal-plan shortcut.")
@@ -8049,7 +8054,7 @@ def settings_page():
 
     with tabs[6]:
         st.subheader('Data & privacy')
-        st.success('☁️ Private Supabase sync is active for your signed-in ChapLife account.')
+        st.success('☁️ Private Supabase sync is active for your signed-in LifeMode account.')
         st.info('🔄 Automatic sync runs every **2 minutes** while ChapLife is open.')
         st.warning('Do not upload private databases, financial exports, health screenshots, passwords, or API credentials to the public GitHub repository.')
         devmode=st.toggle('Developer Mode (show technical diagnostics)',value=bool(get_setting('developer_mode',False)),key='developer_mode_toggle')
