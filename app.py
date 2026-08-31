@@ -21,7 +21,7 @@ def current_db_path():
 
 st.set_page_config(page_title='ChapLife', page_icon='✨', layout='wide', initial_sidebar_state='collapsed')
 
-BUILD_VERSION='ChapLife 7.2.8 · Trip Ownership Controls'
+BUILD_VERSION='ChapLife 7.2.9 · Finance Provider Routing Fix'
 
 st.markdown('''
 <style>
@@ -3789,6 +3789,27 @@ def ensure_finance_schema():
 def finances():
     st.title("💰 Finances")
     ensure_finance_schema()
+
+    # Preserve the owner's existing Affirm/Klarna wallets as provider tabs.
+    # New member accounts still start clean unless they add their own providers.
+    try:
+        if _is_owner():
+            owner_u=_current_user()
+            if owner_u:
+                existing_keys={str(r["provider_key"]).lower() for r in rows(
+                    "SELECT provider_key FROM finance_providers WHERE user_id=?",
+                    (owner_u["id"],)
+                )}
+                defaults=[("affirm","Affirm",10),("klarna","Klarna",20)]
+                for pkey,pname,sort in defaults:
+                    if pkey not in existing_keys:
+                        execute("""INSERT INTO finance_providers
+                                   (user_id,provider_key,display_name,active,sort_order)
+                                   VALUES(?,?,?,?,?)""",
+                                (owner_u["id"],pkey,pname,1,sort))
+    except Exception:
+        pass
+
     preload_uploaded_budget_once()
     seed_recurring_due_dates_once()
     reassign_bnpl_installments()
@@ -3963,23 +3984,27 @@ def finances():
         except Exception as _finance_tab_error:
             print('ChapLife Finance tab 1 error:', repr(_finance_tab_error))
             st.warning('This section needs a compatibility update. The rest of Finance is still available from the menu above.')
-    if section=="🅰️ Affirm":
-        try:
-            st.subheader("🅰️ Affirm")
-            _render_provider_wallet("Affirm","affirm")
+    # Custom payment-provider wallets (Affirm, Klarna, or any provider the user adds).
+    # The visible tab label may be customized, so route by the provider record
+    # instead of relying on old hard-coded emoji labels.
+    provider_section=None
+    if u and section.startswith("🧾 "):
+        provider_label=section.replace("🧾 ","",1).strip()
+        matches=rows("""SELECT * FROM finance_providers
+                        WHERE user_id=? AND active=1 AND display_name=?
+                        ORDER BY id LIMIT 1""",(u["id"],provider_label))
+        if matches:
+            provider_section=matches[0]
 
-        except Exception as _finance_tab_error:
-            print('ChapLife Finance tab 2 error:', repr(_finance_tab_error))
-            st.warning('This section needs a compatibility update. The rest of Finance is still available from the menu above.')
-    if section=="🛍️ Klarna":
+    if provider_section:
         try:
-            st.subheader("🛍️ Klarna")
-            _render_provider_wallet("Klarna","klarna")
-
-        # 5 SAVINGS — account goal + sinking funds
+            display_name=provider_section["display_name"] or "Payment Plan"
+            provider_key=provider_section["provider_key"] or display_name.lower()
+            st.subheader(f"🧾 {display_name}")
+            _render_provider_wallet(display_name,provider_key)
         except Exception as _finance_tab_error:
-            print('ChapLife Finance tab 3 error:', repr(_finance_tab_error))
-            st.warning('This section needs a compatibility update. The rest of Finance is still available from the menu above.')
+            print('ChapLife Finance provider error:', repr(_finance_tab_error))
+            st.warning('This payment-provider section needs a compatibility update. Your saved data is still protected.')
     if section=="🏦 Savings":
 
         try:
