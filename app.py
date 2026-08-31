@@ -21,7 +21,7 @@ def current_db_path():
 
 st.set_page_config(page_title='ChapLife', page_icon='✨', layout='wide', initial_sidebar_state='collapsed')
 
-BUILD_VERSION='ChapLife 7.2.7 · Home Dashboard Fix'
+BUILD_VERSION='ChapLife 7.2.8 · Trip Ownership Controls'
 
 st.markdown('''
 <style>
@@ -448,11 +448,22 @@ def _shared_visible_trips(actor=None):
                 "member_id=eq."+urllib.parse.quote(str(actor["member_id"]))+"&select=trip_id"
             )
         member_trip_ids={str(x.get("trip_id")) for x in memberships}
-        return [
-            t for t in trips
-            if str(t.get("owner_ref") or "")==str(actor.get("ref") or "")
-            or str(t.get("id")) in member_trip_ids
-        ]
+        visible=[]
+        actor_ref=str(actor.get("ref") or "")
+        for t in trips:
+            retained=t.get("retained_viewer_refs") or []
+            if isinstance(retained,str):
+                try:
+                    retained=json.loads(retained) if retained.strip() else []
+                except Exception:
+                    retained=[x.strip() for x in retained.split(",") if x.strip()]
+            if (
+                str(t.get("owner_ref") or "")==actor_ref
+                or str(t.get("id")) in member_trip_ids
+                or actor_ref in {str(x) for x in retained}
+            ):
+                visible.append(t)
+        return visible
     except Exception:
         return []
 
@@ -714,6 +725,85 @@ def _safe_calendar_filename(trip):
     raw=str(trip.get("name") or "ChapLife Trip")
     safe=re.sub(r"[^A-Za-z0-9 _-]+","",raw).strip().replace(" ","_")
     return (safe or "ChapLife_Trip")+".ics"
+
+
+def _transfer_shared_trip_ownership(trip, new_owner_member):
+    """Transfer creator control while preserving the prior creator's view access."""
+    actor=_shared_trip_actor()
+    if not _shared_trip_is_owner(trip,actor):
+        raise PermissionError("Only the current trip creator can transfer ownership.")
+
+    new_member_id=str(new_owner_member.get("member_id") or "")
+    new_name=str(new_owner_member.get("member_name") or "ChapLife user").strip()
+    if not new_member_id:
+        raise ValueError("Choose a ChapLife member who is already on the trip.")
+
+    old_owner_ref=str(trip.get("owner_ref") or "")
+    retained=trip.get("retained_viewer_refs") or []
+    if isinstance(retained,str):
+        try:
+            retained=json.loads(retained) if retained.strip() else []
+        except Exception:
+            retained=[x.strip() for x in retained.split(",") if x.strip()]
+    retained=[str(x) for x in retained if str(x).strip()]
+
+    # If the old creator has a normal member row, keep them as a member.
+    # The app-owner account has no chaplife_members UUID, so preserve their
+    # visibility through retained_viewer_refs instead.
+    if actor.get("member_id"):
+        try:
+            _shared_post(
+                "chaplife_shared_trip_members",
+                {
+                    "trip_id":trip["id"],
+                    "member_id":actor["member_id"],
+                    "member_name":actor["name"],
+                    "rsvp":"Going",
+                    "role":"Member",
+                    "can_suggest":True,
+                    "can_edit":True
+                },
+                "trip_id,member_id"
+            )
+        except Exception:
+            pass
+    elif old_owner_ref and old_owner_ref not in retained:
+        retained.append(old_owner_ref)
+
+    # Promote the selected traveler.
+    _shared_patch(
+        "chaplife_shared_trip_members",
+        "trip_id=eq."+urllib.parse.quote(str(trip["id"]))+
+        "&member_id=eq."+urllib.parse.quote(new_member_id),
+        {
+            "role":"Owner",
+            "rsvp":"Going",
+            "can_suggest":True,
+            "can_edit":True
+        }
+    )
+
+    # Demote any other member row that still says Owner.
+    for m in _shared_trip_members(trip["id"]):
+        if str(m.get("member_id") or "")!=new_member_id and m.get("role")=="Owner":
+            _shared_patch(
+                "chaplife_shared_trip_members",
+                "trip_id=eq."+urllib.parse.quote(str(trip["id"]))+
+                "&member_id=eq."+urllib.parse.quote(str(m["member_id"])),
+                {"role":"Member"}
+            )
+
+    # The owner_ref for regular ChapLife users is their member UUID.
+    _shared_patch(
+        "chaplife_shared_trips",
+        "id=eq."+urllib.parse.quote(str(trip["id"])),
+        {
+            "owner_ref":new_member_id,
+            "owner_name":new_name,
+            "retained_viewer_refs":retained,
+            "updated_at":datetime.now().isoformat(timespec="seconds")
+        }
+    )
 
 def trips_page():
     st.title("✈️ Trips")
@@ -984,6 +1074,86 @@ def trips_page():
                                 "can_edit":True if mode=="Everyone can edit" else bool(m.get("can_edit"))
                             }
                         )
+                st.rerun()
+
+            st.divider()
+            st.markdown("#### 🔑 Transfer ownership")
+            transferable=[
+                m for m in _shared_trip_members(trip["id"])
+                if m.get("role")!="Owner" and m.get("member_id")
+            ]
+            if transferable:
+                transfer_map={
+                    str(m["member_id"]):m.get("member_name") or "ChapLife user"
+                    for m in transferable
+                }
+                new_owner_id=st.selectbox(
+                    "Choose the new trip owner",
+                    options=[""]+list(transfer_map.keys()),
+                    format_func=lambda x:"Select someone…" if x=="" else transfer_map[x],
+                    key=f"transfer_trip_owner_{trip['id']}"
+                )
+                st.caption(
+                    "The new owner will be able to invite/remove people, change planning control, "
+                    "finalize costs, transfer ownership again, or delete the trip."
+                )
+                transfer_confirm=st.checkbox(
+                    "I understand I am giving creator control to this person.",
+                    key=f"confirm_transfer_{trip['id']}"
+                )
+                if st.button(
+                    "Transfer Trip Ownership",
+                    key=f"do_transfer_{trip['id']}",
+                    use_container_width=True,
+                    disabled=(not new_owner_id or not transfer_confirm)
+                ):
+                    target=next(
+                        m for m in transferable
+                        if str(m.get("member_id"))==str(new_owner_id)
+                    )
+                    _transfer_shared_trip_ownership(trip,target)
+                    st.success(f"{target.get('member_name') or 'The selected member'} is now the trip owner.")
+                    st.rerun()
+            else:
+                st.caption("Add another ChapLife user to this trip before transferring ownership.")
+
+            st.divider()
+            st.markdown("#### 🗑️ Delete trip")
+            st.warning(
+                "Deleting a trip permanently removes the shared trip, its invitations, ideas, "
+                "votes, comments, and finalized group costs. Travelers' private Finance data "
+                "outside the shared trip is not exposed."
+            )
+            delete_phrase=st.text_input(
+                f'Type the trip name to confirm: {trip.get("name") or "Trip"}',
+                key=f"delete_trip_phrase_{trip['id']}"
+            )
+            exact_name=str(trip.get("name") or "Trip").strip()
+            can_delete=(delete_phrase.strip()==exact_name)
+            if st.button(
+                "Permanently Delete Trip",
+                key=f"delete_shared_trip_{trip['id']}",
+                type="primary",
+                use_container_width=True,
+                disabled=not can_delete
+            ):
+                _shared_delete(
+                    "chaplife_shared_trips",
+                    "id=eq."+urllib.parse.quote(str(trip["id"]))
+                )
+                # Remove only this user's local link to the deleted shared trip.
+                pref=_private_trip_pref(trip["id"])
+                if pref and pref.get("savings_goal_id"):
+                    try:
+                        execute("DELETE FROM savings_goals WHERE id=?",(pref["savings_goal_id"],))
+                    except Exception:
+                        pass
+                execute(
+                    "DELETE FROM shared_trip_finance_preferences WHERE cloud_trip_id=?",
+                    (str(trip["id"]),)
+                )
+                st.session_state.pop("shared_trip_select",None)
+                st.success("Trip deleted.")
                 st.rerun()
 
     # ----------------------- RSVP -----------------------
