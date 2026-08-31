@@ -21,7 +21,7 @@ def current_db_path():
 
 st.set_page_config(page_title='ChapLife', page_icon='✨', layout='wide', initial_sidebar_state='collapsed')
 
-BUILD_VERSION='ChapLife 7.2.2 · Personal Header + Themes'
+BUILD_VERSION='ChapLife 7.2.4 · Shared Trips + Private Budget Choice'
 
 st.markdown('''
 <style>
@@ -354,337 +354,838 @@ def _provider_name(provider_key, fallback):
     return r[0]["display_name"] if r and r[0]["display_name"] else fallback
 
 
-def _trip_user_ref():
+
+def _shared_trip_actor():
+    """Return the shared-trip identity without exposing anyone's private DB."""
     u=_current_user()
-    if not u: return ("","ChapLife User")
-    return (str(u.get("id") or u.get("username") or "owner"), _safe_display_name(u))
+    if not u:
+        return {"ref":"","member_id":None,"name":"ChapLife User","is_owner":False}
+    if _is_owner():
+        ref=f"owner:{u.get('username') or u.get('id') or 'chaplife'}"
+        return {"ref":ref,"member_id":None,"name":_safe_display_name(u),"is_owner":True}
+    mid=str(u.get("id") or "")
+    return {"ref":mid,"member_id":mid or None,"name":_safe_display_name(u),"is_owner":False}
 
-def _trip_can_edit(trip):
-    ref,_=_trip_user_ref()
-    if _is_owner() and str(trip["owner_user_id"])==ref:
-        return True
-    if str(trip["owner_user_id"])==ref:
-        return True
-    member=rows("SELECT * FROM trip_members WHERE trip_id=? AND member_ref=?",(trip["id"],ref))
-    if not member: return False
-    mode=trip["planning_mode"] or "Owner only"
-    if mode=="Everyone can edit":
-        return True
-    return bool(member[0]["can_edit"])
+def _shared_api(table, query=""):
+    suffix=("?"+query) if query else ""
+    return _admin_http_json(f"/rest/v1/{table}{suffix}")
 
-def _trip_can_suggest(trip):
-    ref,_=_trip_user_ref()
-    if str(trip["owner_user_id"])==ref:
+def _shared_post(table, payload, on_conflict=None):
+    path=f"/rest/v1/{table}"
+    if on_conflict:
+        path += "?on_conflict="+urllib.parse.quote(on_conflict,safe=",")
+    headers={"Prefer":"return=representation"}
+    if on_conflict:
+        headers["Prefer"]="resolution=merge-duplicates,return=representation"
+    return _admin_http_json(path,"POST",payload,headers)
+
+def _shared_patch(table, filters, payload):
+    return _admin_http_json(
+        f"/rest/v1/{table}?{filters}","PATCH",payload,
+        {"Prefer":"return=representation"}
+    )
+
+def _shared_delete(table, filters):
+    return _admin_http_json(
+        f"/rest/v1/{table}?{filters}","DELETE",None,
+        {"Prefer":"return=minimal"}
+    )
+
+def _shared_trip_members(trip_id):
+    try:
+        return _shared_api(
+            "chaplife_shared_trip_members",
+            "trip_id=eq."+urllib.parse.quote(str(trip_id))+"&select=*&order=role.desc,member_name.asc"
+        )
+    except Exception:
+        return []
+
+def _shared_trip_member_record(trip_id, member_id):
+    if not member_id:
+        return None
+    try:
+        data=_shared_api(
+            "chaplife_shared_trip_members",
+            "trip_id=eq."+urllib.parse.quote(str(trip_id))+
+            "&member_id=eq."+urllib.parse.quote(str(member_id))+"&select=*"
+        )
+        return data[0] if data else None
+    except Exception:
+        return None
+
+def _shared_trip_is_owner(trip, actor=None):
+    actor=actor or _shared_trip_actor()
+    return str(trip.get("owner_ref") or "")==str(actor.get("ref") or "")
+
+def _shared_trip_can_suggest(trip, actor=None):
+    actor=actor or _shared_trip_actor()
+    if _shared_trip_is_owner(trip,actor):
         return True
-    member=rows("SELECT * FROM trip_members WHERE trip_id=? AND member_ref=?",(trip["id"],ref))
-    if not member: return False
-    mode=trip["planning_mode"] or "Owner only"
-    if mode in ("Everyone can suggest","Everyone can edit"):
+    member=_shared_trip_member_record(trip["id"],actor.get("member_id"))
+    if not member:
+        return False
+    mode=trip.get("planning_mode") or "Owner only"
+    return mode in ("Everyone can suggest","Everyone can edit") or bool(member.get("can_suggest"))
+
+def _shared_trip_can_edit(trip, actor=None):
+    actor=actor or _shared_trip_actor()
+    if _shared_trip_is_owner(trip,actor):
         return True
-    return bool(member[0]["can_suggest"])
+    member=_shared_trip_member_record(trip["id"],actor.get("member_id"))
+    if not member:
+        return False
+    mode=trip.get("planning_mode") or "Owner only"
+    return mode=="Everyone can edit" or bool(member.get("can_edit"))
 
-def _trip_member_count(trip_id):
-    going=rows("SELECT COUNT(*) AS n FROM trip_members WHERE trip_id=? AND rsvp IN ('Going','Invited','Maybe')",(trip_id,))
-    return max(1,int(going[0]["n"] if going else 1))
+def _shared_visible_trips(actor=None):
+    actor=actor or _shared_trip_actor()
+    try:
+        trips=_shared_api("chaplife_shared_trips","select=*&order=start_date.asc.nullslast,created_at.desc")
+        memberships=[]
+        if actor.get("member_id"):
+            memberships=_shared_api(
+                "chaplife_shared_trip_members",
+                "member_id=eq."+urllib.parse.quote(str(actor["member_id"]))+"&select=trip_id"
+            )
+        member_trip_ids={str(x.get("trip_id")) for x in memberships}
+        return [
+            t for t in trips
+            if str(t.get("owner_ref") or "")==str(actor.get("ref") or "")
+            or str(t.get("id")) in member_trip_ids
+        ]
+    except Exception:
+        return []
 
-def _trip_personal_total(trip_id):
-    vals=rows("SELECT COALESCE(SUM(personal_amount),0) AS total FROM trip_budget_items WHERE trip_id=?",(trip_id,))
-    return float(vals[0]["total"] if vals else 0)
+def _shared_trip_options(trip_id):
+    try:
+        return _shared_api(
+            "chaplife_shared_trip_options",
+            "trip_id=eq."+urllib.parse.quote(str(trip_id))+"&select=*&order=category.asc,created_at.desc"
+        )
+    except Exception:
+        return []
 
-def _trip_sync_savings_goal(trip_id):
-    trip=rows("SELECT * FROM trips WHERE id=?",(trip_id,))
-    if not trip: return
-    trip=trip[0]
-    target=_trip_personal_total(trip_id)
-    existing=rows("SELECT * FROM trip_savings_links WHERE trip_id=?",(trip_id,))
-    # Estimate remaining paychecks from biweekly cadence if dates exist; otherwise use 1.
+def _shared_trip_votes(option_id):
+    try:
+        return _shared_api(
+            "chaplife_shared_trip_votes",
+            "option_id=eq."+urllib.parse.quote(str(option_id))+"&select=*"
+        )
+    except Exception:
+        return []
+
+def _shared_trip_budget_items(trip_id):
+    try:
+        return _shared_api(
+            "chaplife_shared_trip_budget_items",
+            "trip_id=eq."+urllib.parse.quote(str(trip_id))+"&select=*&order=created_at.asc"
+        )
+    except Exception:
+        return []
+
+def _shared_trip_final_total(trip_id):
+    return sum(float(x.get("total_amount") or 0) for x in _shared_trip_budget_items(trip_id))
+
+def _shared_trip_people_count(trip_id):
+    members=_shared_trip_members(trip_id)
+    included=[
+        m for m in members
+        if (m.get("rsvp") or "Invited") in ("Going","Maybe","Invited")
+    ]
+    # If the owner is the local owner account, they are not stored in the UUID member table.
+    owner_in_members=any((m.get("role")=="Owner") for m in members)
+    return max(1,len(included)+(0 if owner_in_members else 1))
+
+def _private_trip_pref(cloud_trip_id):
+    rr=rows("SELECT * FROM shared_trip_finance_preferences WHERE cloud_trip_id=?",(str(cloud_trip_id),))
+    return dict(rr[0]) if rr else None
+
+def _trip_target_from_choice(final_total, people_count, portion_type, portion_value, planning_amount):
+    final_total=float(final_total or 0)
+    people=max(1,int(people_count or 1))
+    portion_value=float(portion_value or 0)
+    planning_amount=float(planning_amount or 0)
+
+    if final_total<=0:
+        return max(0,planning_amount)
+    if portion_type=="Equal share":
+        return final_total/people
+    if portion_type=="Percentage of trip total":
+        return final_total*(max(0,portion_value)/100.0)
+    if portion_type=="Custom amount":
+        return max(0,portion_value)
+    if portion_type=="Full trip total":
+        return final_total
+    return max(0,planning_amount)
+
+def _trip_per_paycheck(target_amount, target_date):
+    target=float(target_amount or 0)
     checks=1
-    if trip["start_date"]:
+    if target_date:
         try:
-            start=datetime.strptime(trip["start_date"],"%Y-%m-%d").date()
-            today=date.today()
-            days=max(0,(start-today).days)
+            d=datetime.strptime(str(target_date),"%Y-%m-%d").date()
+            days=max(0,(d-date.today()).days)
             checks=max(1,days//14)
         except Exception:
             checks=1
-    per=target/checks if checks else target
-    if existing:
-        execute("UPDATE trip_savings_links SET target_amount=?,per_paycheck=? WHERE trip_id=?",(target,per,trip_id))
-        gid=existing[0]["savings_goal_id"]
-        if gid:
-            try:
-                execute("UPDATE savings_goals SET target_amount=?, contribution_frequency=?, note=? WHERE id=?",
-                        (target,f"${per:,.2f} per paycheck",f"Linked to trip: {trip['name']}",gid))
-            except Exception:
-                pass
+    return target/checks if checks else target
+
+def _save_private_trip_finance(trip, connected, timing_choice, portion_type, portion_value, planning_amount):
+    trip_id=str(trip["id"])
+    final_total=_shared_trip_final_total(trip_id)
+    people=_shared_trip_people_count(trip_id)
+
+    # "Wait until finalized" does not create a target until the group has finalized costs.
+    if timing_choice=="Wait until finalized" and final_total<=0:
+        target=0.0
     else:
-        gid=None
-        try:
-            execute("""INSERT INTO savings_goals(name,target_amount,current_amount,target_date,goal_type,priority,contribution_frequency,note)
-                       VALUES(?,?,?,?,?,?,?,?)""",
-                    (f"Trip: {trip['name']}",target,0,trip["start_date"],"Trip","High",f"${per:,.2f} per paycheck",
-                     f"Automatically linked to Trips"))
-            gid=rows("SELECT last_insert_rowid() AS id")[0]["id"]
-        except Exception:
-            gid=None
-        execute("""INSERT OR REPLACE INTO trip_savings_links(trip_id,savings_goal_id,target_amount,current_amount,per_paycheck,note)
-                   VALUES(?,?,?,?,?,?)""",
-                (trip_id,gid,target,0,per,f"Linked to {trip['name']}"))
+        target=_trip_target_from_choice(
+            final_total,people,portion_type,portion_value,planning_amount
+        )
+    per=_trip_per_paycheck(target,trip.get("start_date"))
+    now=datetime.now().isoformat(timespec="seconds")
+    old=_private_trip_pref(trip_id)
+    goal_id=(old or {}).get("savings_goal_id")
+
+    if connected and target>0:
+        goal_name=f"Trip: {trip.get('name') or 'Upcoming Trip'}"
+        if goal_id:
+            try:
+                execute(
+                    """UPDATE savings_goals
+                       SET name=?,target_amount=?,target_date=?,goal_type=?,priority=?,
+                           contribution_frequency=?,note=?
+                       WHERE id=?""",
+                    (
+                        goal_name,target,trip.get("start_date"),"Trip","High",
+                        f"${per:,.2f} per paycheck",
+                        f"Linked to shared ChapLife trip: {trip.get('name') or ''}",
+                        goal_id
+                    )
+                )
+            except Exception:
+                goal_id=None
+        if not goal_id:
+            goal_id=execute(
+                """INSERT INTO savings_goals
+                   (name,goal_type,target_amount,current_amount,target_date,priority,contribution_frequency,note)
+                   VALUES(?,?,?,?,?,?,?,?)""",
+                (
+                    goal_name,"Trip",target,0,trip.get("start_date"),"High",
+                    f"${per:,.2f} per paycheck",
+                    f"Linked to shared ChapLife trip: {trip.get('name') or ''}"
+                )
+            )
+    elif goal_id:
+        # Disconnecting a shared trip removes only the linked trip savings goal.
+        execute("DELETE FROM savings_goals WHERE id=?",(goal_id,))
+        goal_id=None
+
+    execute(
+        """INSERT INTO shared_trip_finance_preferences
+           (cloud_trip_id,trip_name,target_date,connected,timing_choice,portion_type,
+            portion_value,planning_amount,target_amount,per_paycheck,savings_goal_id,updated_at)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+           ON CONFLICT(cloud_trip_id) DO UPDATE SET
+             trip_name=excluded.trip_name,
+             target_date=excluded.target_date,
+             connected=excluded.connected,
+             timing_choice=excluded.timing_choice,
+             portion_type=excluded.portion_type,
+             portion_value=excluded.portion_value,
+             planning_amount=excluded.planning_amount,
+             target_amount=excluded.target_amount,
+             per_paycheck=excluded.per_paycheck,
+             savings_goal_id=excluded.savings_goal_id,
+             updated_at=excluded.updated_at""",
+        (
+            trip_id,trip.get("name"),trip.get("start_date"),1 if connected else 0,
+            timing_choice,portion_type,float(portion_value or 0),float(planning_amount or 0),
+            float(target),float(per),goal_id,now
+        )
+    )
+    return target,per
+
+def _refresh_private_trip_finance_if_needed(trip):
+    pref=_private_trip_pref(trip["id"])
+    if not pref or not pref.get("connected"):
+        return
+    # If a user chose "wait until finalized", automatically create/update the
+    # private goal once shared finalized costs exist.
+    final_total=_shared_trip_final_total(trip["id"])
+    if final_total>0:
+        _save_private_trip_finance(
+            trip,True,pref.get("timing_choice") or "Wait until finalized",
+            pref.get("portion_type") or "Equal share",
+            pref.get("portion_value") or 0,
+            pref.get("planning_amount") or 0
+        )
 
 def trips_page():
     st.title("✈️ Trips")
-    st.caption("Plan it yourself or with your people. Ideas stay separate from final costs, and finalized costs can become a savings goal in Finances.")
+    st.caption(
+        "Trips are shared only with the ChapLife people invited to them. "
+        "Each person's Finance and savings choices remain private."
+    )
 
-    ref,name=_trip_user_ref()
+    if not MULTIUSER_CONFIGURED:
+        st.warning("Shared Trips needs the ChapLife multi-user Supabase setup.")
+        return
 
+    actor=_shared_trip_actor()
+
+    # ----------------------- CREATE TRIP -----------------------
     with st.expander("＋ Let’s go on a trip",expanded=False):
-        with st.form("create_trip_form",clear_on_submit=True):
+        with st.form("create_shared_trip_form",clear_on_submit=True):
             c1,c2=st.columns(2)
             trip_name=c1.text_input("Trip name",placeholder="Miami Birthday Trip")
             destination=c2.text_input("Destination",placeholder="Miami, FL")
             departure=st.text_input("Leaving from",placeholder="New York, NY")
             d1,d2=st.columns(2)
-            start=d1.date_input("Start date",format="MM/DD/YYYY",key="trip_start_new")
-            end=d2.date_input("End date",format="MM/DD/YYYY",key="trip_end_new")
-            mode=st.selectbox("Planning control",["Owner only","Everyone can suggest","Everyone can edit"])
+            start=d1.date_input("Start date",format="MM/DD/YYYY",key="shared_trip_start_new")
+            end=d2.date_input("End date",format="MM/DD/YYYY",key="shared_trip_end_new")
+            mode=st.selectbox(
+                "Planning control",
+                ["Owner only","Everyone can suggest","Everyone can edit"]
+            )
             notes=st.text_area("Trip notes",placeholder="Budget, vibe, must-do items, etc.")
             if st.form_submit_button("Create Trip",use_container_width=True):
                 if not trip_name.strip():
                     st.warning("Give the trip a name.")
+                elif end < start:
+                    st.warning("The end date has to be on or after the start date.")
                 else:
                     now=datetime.now().isoformat(timespec="seconds")
-                    execute("""INSERT INTO trips(owner_user_id,name,destination,departure_city,start_date,end_date,planning_mode,status,notes,created_at,updated_at)
-                               VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
-                            (ref,trip_name.strip(),destination.strip(),departure.strip(),
-                             start.isoformat(),end.isoformat(),mode,"Ideas",notes,now,now))
-                    tid=rows("SELECT last_insert_rowid() AS id")[0]["id"]
-                    execute("""INSERT OR IGNORE INTO trip_members(trip_id,member_ref,member_name,rsvp,role,can_suggest,can_edit)
-                               VALUES(?,?,?,?,?,?,?)""",
-                            (tid,ref,name,"Going","Owner",1,1))
+                    made=_shared_post(
+                        "chaplife_shared_trips",
+                        {
+                            "owner_ref":actor["ref"],
+                            "owner_name":actor["name"],
+                            "name":trip_name.strip(),
+                            "destination":destination.strip(),
+                            "departure_city":departure.strip(),
+                            "start_date":start.isoformat(),
+                            "end_date":end.isoformat(),
+                            "planning_mode":mode,
+                            "status":"Ideas",
+                            "notes":notes,
+                            "created_at":now,
+                            "updated_at":now
+                        }
+                    )
+                    trip_id=(made[0]["id"] if made else None)
+                    # Friend/member creators are also stored in shared membership.
+                    if trip_id and actor.get("member_id"):
+                        _shared_post(
+                            "chaplife_shared_trip_members",
+                            {
+                                "trip_id":trip_id,
+                                "member_id":actor["member_id"],
+                                "member_name":actor["name"],
+                                "rsvp":"Going",
+                                "role":"Owner",
+                                "can_suggest":True,
+                                "can_edit":True
+                            },
+                            "trip_id,member_id"
+                        )
                     st.success("Trip created.")
                     st.rerun()
 
-    my_trips=rows("""SELECT DISTINCT t.* FROM trips t
-                     LEFT JOIN trip_members m ON m.trip_id=t.id
-                     WHERE t.owner_user_id=? OR m.member_ref=?
-                     ORDER BY COALESCE(t.start_date,'9999-12-31'),t.id DESC""",(ref,ref))
-    if not my_trips:
-        st.info("No trips yet. Create one above when you're ready.")
+    trips=_shared_visible_trips(actor)
+    if not trips:
+        st.info("No shared trips yet. Create one above or wait for someone to invite you.")
         return
 
-    labels={t["id"]:f"{t['name']} · {us_date(t['start_date']) if t['start_date'] else 'No date'}" for t in my_trips}
-    selected_id=st.selectbox("Choose a trip",options=list(labels.keys()),format_func=lambda x:labels[x],key="trip_select")
-    trip=next(t for t in my_trips if t["id"]==selected_id)
+    labels={
+        str(t["id"]):f"{t.get('name') or 'Trip'} · {us_date(t.get('start_date')) if t.get('start_date') else 'No date'}"
+        for t in trips
+    }
+    selected_id=st.selectbox(
+        "Choose a trip",
+        options=list(labels.keys()),
+        format_func=lambda x:labels[x],
+        key="shared_trip_select"
+    )
+    trip=next(t for t in trips if str(t["id"])==str(selected_id))
+    _refresh_private_trip_finance_if_needed(trip)
+
+    members=_shared_trip_members(trip["id"])
+    final_total=_shared_trip_final_total(trip["id"])
+    pref=_private_trip_pref(trip["id"])
+    personal_target=float((pref or {}).get("target_amount") or 0)
 
     with st.container(border=True):
-        st.markdown(f"## {trip['name']}")
+        st.markdown(f"## {trip.get('name') or 'Trip'}")
         meta=[]
-        if trip["destination"]: meta.append(trip["destination"])
-        if trip["start_date"]: meta.append(us_date(trip["start_date"]))
-        if trip["end_date"]: meta.append("to "+us_date(trip["end_date"]))
-        st.caption(" · ".join(meta) if meta else "Trip details not finalized")
+        if trip.get("destination"): meta.append(trip["destination"])
+        if trip.get("start_date"): meta.append(us_date(trip["start_date"]))
+        if trip.get("end_date"): meta.append("to "+us_date(trip["end_date"]))
+        if trip.get("owner_name"): meta.append("Created by "+trip["owner_name"])
+        st.caption(" · ".join(meta) if meta else "Trip details")
         c=st.columns(4)
-        c[0].metric("Stage",trip["status"] or "Ideas")
-        c[1].metric("Planning",trip["planning_mode"] or "Owner only")
-        c[2].metric("People",_trip_member_count(trip["id"]))
-        c[3].metric("Your Final Cost",f"${_trip_personal_total(trip['id']):,.2f}")
+        c[0].metric("Stage",trip.get("status") or "Ideas")
+        c[1].metric("Planning",trip.get("planning_mode") or "Owner only")
+        c[2].metric("People",_shared_trip_people_count(trip["id"]))
+        c[3].metric("Your Finance Goal",f"${personal_target:,.2f}" if personal_target else "Not connected")
 
-    # Owner controls
-    if str(trip["owner_user_id"])==ref:
-        with st.expander("Trip owner controls"):
-            mode=st.selectbox("Planning control",["Owner only","Everyone can suggest","Everyone can edit"],
-                              index=["Owner only","Everyone can suggest","Everyone can edit"].index(trip["planning_mode"])
-                              if trip["planning_mode"] in ["Owner only","Everyone can suggest","Everyone can edit"] else 0,
-                              key=f"trip_mode_{trip['id']}")
-            stage=st.selectbox("Trip stage",["Ideas","Voting","Finalized","Saving","Ready ✈️"],
-                               index=["Ideas","Voting","Finalized","Saving","Ready ✈️"].index(trip["status"])
-                               if trip["status"] in ["Ideas","Voting","Finalized","Saving","Ready ✈️"] else 0,
-                               key=f"trip_stage_{trip['id']}")
-            if st.button("Save Trip Controls",key=f"save_trip_controls_{trip['id']}",use_container_width=True):
-                execute("UPDATE trips SET planning_mode=?,status=?,updated_at=? WHERE id=?",
-                        (mode,stage,datetime.now().isoformat(timespec="seconds"),trip["id"]))
+    # ----------------------- CREATOR CONTROLS -----------------------
+    if _shared_trip_is_owner(trip,actor):
+        with st.expander("👑 Trip creator controls",expanded=False):
+            st.markdown("#### Who can see this trip")
+            st.caption(
+                "Invite people who already have an approved ChapLife account. "
+                "Once added, the trip appears in their Trips section."
+            )
+
+            try:
+                approved=_admin_http_json(
+                    "/rest/v1/chaplife_members?status=eq.approved&active=eq.true"
+                    "&select=id,display_name,username&order=display_name.asc"
+                )
+            except Exception:
+                approved=[]
+
+            current_member_ids={str(m.get("member_id")) for m in members if m.get("member_id")}
+            choices={
+                str(m["id"]):(m.get("display_name") or m.get("username") or "ChapLife user")
+                for m in approved
+                if str(m["id"])!=str(actor.get("member_id") or "")
+                and str(m["id"]) not in current_member_ids
+            }
+            invite_ids=st.multiselect(
+                "Add people from ChapLife",
+                list(choices.keys()),
+                format_func=lambda x:choices[x],
+                key=f"central_trip_invites_{trip['id']}"
+            )
+            if st.button("Add Selected People",key=f"add_shared_people_{trip['id']}",use_container_width=True):
+                for mid in invite_ids:
+                    _shared_post(
+                        "chaplife_shared_trip_members",
+                        {
+                            "trip_id":trip["id"],
+                            "member_id":mid,
+                            "member_name":choices[mid],
+                            "rsvp":"Invited",
+                            "role":"Member",
+                            "can_suggest":trip.get("planning_mode")!="Owner only",
+                            "can_edit":trip.get("planning_mode")=="Everyone can edit"
+                        },
+                        "trip_id,member_id"
+                    )
+                st.success("They can now see this trip in ChapLife.")
                 st.rerun()
 
-            st.markdown("#### Invite / remove people")
-            if MULTIUSER_CONFIGURED:
-                try:
-                    members=_admin_http_json("/rest/v1/chaplife_members?status=eq.approved&active=eq.true&select=id,display_name,username&order=display_name.asc")
-                except Exception:
-                    members=[]
-            else:
-                members=[]
-            current=rows("SELECT * FROM trip_members WHERE trip_id=? ORDER BY role DESC,member_name",(trip["id"],))
-            current_refs={str(m["member_ref"]) for m in current}
-            choices={str(m["id"]):m.get("display_name") or m.get("username") or "ChapLife user" for m in members if str(m["id"])!=ref}
-            add_refs=st.multiselect("Invite ChapLife users",options=list(choices.keys()),format_func=lambda x:choices[x],
-                                    key=f"trip_invites_{trip['id']}")
-            if st.button("Send/Add Invites",key=f"trip_add_invites_{trip['id']}",use_container_width=True):
-                for rid in add_refs:
-                    execute("""INSERT OR IGNORE INTO trip_members(trip_id,member_ref,member_name,rsvp,role,can_suggest,can_edit)
-                               VALUES(?,?,?,?,?,?,?)""",
-                            (trip["id"],rid,choices[rid],"Invited","Member",
-                             1 if trip["planning_mode"]!="Owner only" else 0,
-                             1 if trip["planning_mode"]=="Everyone can edit" else 0))
+            st.markdown("#### People on this trip")
+            members=_shared_trip_members(trip["id"])
+            if not members and actor["is_owner"]:
+                st.caption(f"👑 {actor['name']} — Creator")
+            for m in members:
+                cols=st.columns([3,1,1])
+                crown="👑 " if m.get("role")=="Owner" else ""
+                cols[0].write(f"{crown}{m.get('member_name') or 'ChapLife user'} · {m.get('rsvp') or 'Invited'}")
+                if m.get("role")!="Owner":
+                    if cols[1].button("Remove",key=f"remove_shared_member_{trip['id']}_{m['member_id']}"):
+                        _shared_delete(
+                            "chaplife_shared_trip_members",
+                            "trip_id=eq."+urllib.parse.quote(str(trip["id"]))+
+                            "&member_id=eq."+urllib.parse.quote(str(m["member_id"]))
+                        )
+                        st.rerun()
+                    canedit=bool(m.get("can_edit"))
+                    if cols[2].button(
+                        "Editor ✓" if canedit else "Can edit",
+                        key=f"shared_edit_perm_{trip['id']}_{m['member_id']}"
+                    ):
+                        _shared_patch(
+                            "chaplife_shared_trip_members",
+                            "trip_id=eq."+urllib.parse.quote(str(trip["id"]))+
+                            "&member_id=eq."+urllib.parse.quote(str(m["member_id"])),
+                            {"can_edit":not canedit}
+                        )
+                        st.rerun()
+
+            st.divider()
+            mode_opts=["Owner only","Everyone can suggest","Everyone can edit"]
+            stage_opts=["Ideas","Voting","Finalized","Saving","Ready ✈️"]
+            mode=st.selectbox(
+                "Planning control",
+                mode_opts,
+                index=mode_opts.index(trip.get("planning_mode")) if trip.get("planning_mode") in mode_opts else 0,
+                key=f"shared_trip_mode_{trip['id']}"
+            )
+            stage=st.selectbox(
+                "Trip stage",
+                stage_opts,
+                index=stage_opts.index(trip.get("status")) if trip.get("status") in stage_opts else 0,
+                key=f"shared_trip_stage_{trip['id']}"
+            )
+            if st.button("Save Trip Controls",key=f"save_shared_controls_{trip['id']}",use_container_width=True):
+                _shared_patch(
+                    "chaplife_shared_trips",
+                    "id=eq."+urllib.parse.quote(str(trip["id"])),
+                    {
+                        "planning_mode":mode,
+                        "status":stage,
+                        "updated_at":datetime.now().isoformat(timespec="seconds")
+                    }
+                )
+                # Keep default permissions aligned with the selected mode.
+                for m in _shared_trip_members(trip["id"]):
+                    if m.get("role")!="Owner":
+                        _shared_patch(
+                            "chaplife_shared_trip_members",
+                            "trip_id=eq."+urllib.parse.quote(str(trip["id"]))+
+                            "&member_id=eq."+urllib.parse.quote(str(m["member_id"])),
+                            {
+                                "can_suggest":mode!="Owner only",
+                                "can_edit":True if mode=="Everyone can edit" else bool(m.get("can_edit"))
+                            }
+                        )
                 st.rerun()
 
-            current=rows("SELECT * FROM trip_members WHERE trip_id=? ORDER BY role DESC,member_name",(trip["id"],))
-            for m in current:
-                if m["role"]=="Owner":
-                    st.write(f"👑 {m['member_name']} — Owner")
-                else:
-                    cc=st.columns([3,1,1])
-                    cc[0].write(f"{m['member_name']} — {m['rsvp']}")
-                    if cc[1].button("Remove",key=f"trip_remove_{m['id']}"):
-                        execute("DELETE FROM trip_members WHERE id=?",(m["id"],))
-                        st.rerun()
-                    canedit=bool(m["can_edit"])
-                    if cc[2].button("Edit ✓" if canedit else "Can edit",key=f"trip_editperm_{m['id']}"):
-                        execute("UPDATE trip_members SET can_edit=? WHERE id=?",(0 if canedit else 1,m["id"]))
-                        st.rerun()
-
-    # RSVP for non-owner
-    mine=rows("SELECT * FROM trip_members WHERE trip_id=? AND member_ref=?",(trip["id"],ref))
-    if mine and mine[0]["role"]!="Owner":
-        rsvp=st.radio("Your RSVP",["Going","Maybe","Can't Go"],horizontal=True,
-                      index=["Going","Maybe","Can't Go"].index(mine[0]["rsvp"]) if mine[0]["rsvp"] in ["Going","Maybe","Can't Go"] else 0,
-                      key=f"trip_rsvp_{trip['id']}")
-        if st.button("Save RSVP",key=f"trip_save_rsvp_{trip['id']}"):
-            execute("UPDATE trip_members SET rsvp=? WHERE id=?",(rsvp,mine[0]["id"]))
+    # ----------------------- RSVP -----------------------
+    mine=_shared_trip_member_record(trip["id"],actor.get("member_id"))
+    if mine and mine.get("role")!="Owner":
+        rsvp_opts=["Going","Maybe","Can't Go"]
+        current=mine.get("rsvp") if mine.get("rsvp") in rsvp_opts else "Going"
+        rsvp=st.radio(
+            "Your RSVP",
+            rsvp_opts,
+            horizontal=True,
+            index=rsvp_opts.index(current),
+            key=f"shared_rsvp_{trip['id']}"
+        )
+        if st.button("Save RSVP",key=f"save_shared_rsvp_{trip['id']}"):
+            _shared_patch(
+                "chaplife_shared_trip_members",
+                "trip_id=eq."+urllib.parse.quote(str(trip["id"]))+
+                "&member_id=eq."+urllib.parse.quote(str(actor["member_id"])),
+                {"rsvp":rsvp}
+            )
             st.rerun()
 
-    tabs=st.tabs(["💡 Ideas","🗳️ Decisions","💰 Final Budget","🎯 Savings Plan"])
+    tabs=st.tabs(["💡 Ideas","🗳️ Decisions","💰 Final Trip Cost","💵 My Budget & Savings"])
 
+    # ----------------------- IDEAS -----------------------
     with tabs[0]:
-        can_suggest=_trip_can_suggest(trip)
-        if can_suggest:
-            with st.form(f"trip_option_add_{trip['id']}",clear_on_submit=True):
-                cat=st.selectbox("Category",["Stay","Flights","Activities","Restaurants","Transportation","Events","Other"])
+        if _shared_trip_can_suggest(trip,actor):
+            with st.form(f"shared_option_form_{trip['id']}",clear_on_submit=True):
+                cat=st.selectbox(
+                    "Category",
+                    ["Stay","Flights","Activities","Restaurants","Transportation","Events","Other"]
+                )
                 title=st.text_input("Option name",placeholder="Hotel / flight / activity name")
-                url=st.text_input("Link",placeholder="Paste the website link")
+                url=st.text_input("Link",placeholder="Paste a website link")
                 location=st.text_input("Location (optional)")
                 c1,c2=st.columns(2)
                 low=c1.number_input("Estimated low cost",min_value=0.0,step=10.0)
                 high=c2.number_input("Estimated high cost",min_value=0.0,step=10.0)
-                basis=st.selectbox("Price is for",["Total","Per person","Per night","Per ticket","Other"])
-                notes=st.text_area("Why this option / notes")
+                basis=st.selectbox(
+                    "Price is for",
+                    ["Total","Per person","Per night","Per ticket","Other"]
+                )
+                notes=st.text_area("Notes")
                 if st.form_submit_button("Post Suggestion",use_container_width=True):
                     if not title.strip():
                         st.warning("Add a name for the option.")
                     else:
-                        execute("""INSERT INTO trip_options(trip_id,category,title,url,location,price_low,price_high,price_basis,suggested_by,notes,status,created_at)
-                                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
-                                (trip["id"],cat,title.strip(),url.strip(),location.strip(),float(low),float(high),basis,name,notes,"Idea",
-                                 datetime.now().isoformat(timespec="seconds")))
-                        st.success("Suggestion posted.")
+                        _shared_post(
+                            "chaplife_shared_trip_options",
+                            {
+                                "trip_id":trip["id"],
+                                "category":cat,
+                                "title":title.strip(),
+                                "url":url.strip(),
+                                "location":location.strip(),
+                                "price_low":float(low),
+                                "price_high":float(high),
+                                "price_basis":basis,
+                                "suggested_by_ref":actor["ref"],
+                                "suggested_by_name":actor["name"],
+                                "notes":notes,
+                                "status":"Idea",
+                                "created_at":datetime.now().isoformat(timespec="seconds")
+                            }
+                        )
                         st.rerun()
         else:
-            st.caption("The trip owner currently has suggestions turned off for members.")
+            st.caption("The creator currently has member suggestions turned off.")
 
-        opts=rows("SELECT * FROM trip_options WHERE trip_id=? ORDER BY category,id DESC",(trip["id"],))
-        if not opts:
+        options=_shared_trip_options(trip["id"])
+        if not options:
             st.caption("No ideas posted yet.")
-        for o in opts:
-            votes=rows("SELECT COUNT(*) AS n FROM trip_votes WHERE option_id=? AND vote=1",(o["id"],))
-            vcount=int(votes[0]["n"] if votes else 0)
+        for o in options:
+            votes=_shared_trip_votes(o["id"])
+            vote_count=sum(1 for v in votes if bool(v.get("vote")))
+            myvote=next((v for v in votes if str(v.get("voter_ref"))==actor["ref"]),None)
             with st.container(border=True):
-                head=st.columns([4,1])
-                head[0].markdown(f"**{o['category']} · {o['title']}**")
-                head[1].markdown(f"**👍 {vcount}**")
-                if o["url"]:
+                h=st.columns([4,1])
+                h[0].markdown(f"**{o.get('category')} · {o.get('title')}**")
+                h[1].markdown(f"**👍 {vote_count}**")
+                if o.get("url"):
                     st.markdown(f"[Open link]({o['url']})")
-                if o["price_low"] or o["price_high"]:
-                    if o["price_low"] and o["price_high"]:
-                        st.write(f"Estimated range: **${o['price_low']:,.2f}–${o['price_high']:,.2f}** · {o['price_basis']}")
+                low=float(o.get("price_low") or 0)
+                high=float(o.get("price_high") or 0)
+                if low or high:
+                    if low and high:
+                        st.write(f"Estimated range: **${low:,.2f}–${high:,.2f}** · {o.get('price_basis') or 'Total'}")
                     else:
-                        val=o["price_high"] or o["price_low"]
-                        st.write(f"Estimated cost: **${val:,.2f}** · {o['price_basis']}")
-                if o["notes"]: st.caption(o["notes"])
-                st.caption(f"Suggested by {o['suggested_by'] or 'ChapLife user'}")
+                        st.write(f"Estimated cost: **${(high or low):,.2f}** · {o.get('price_basis') or 'Total'}")
+                if o.get("notes"):
+                    st.caption(o["notes"])
+                st.caption(f"Suggested by {o.get('suggested_by_name') or 'ChapLife user'}")
 
-                myvote=rows("SELECT * FROM trip_votes WHERE option_id=? AND voter_ref=?",(o["id"],ref))
-                cc=st.columns([1,2,1])
-                if cc[0].button("👍 Vote" if not myvote else "✓ Voted",key=f"vote_{o['id']}"):
+                c=st.columns([1,2,1])
+                if c[0].button("✓ Voted" if myvote and myvote.get("vote") else "👍 Vote",key=f"shared_vote_{o['id']}"):
                     if myvote:
-                        execute("DELETE FROM trip_votes WHERE option_id=? AND voter_ref=?",(o["id"],ref))
+                        _shared_patch(
+                            "chaplife_shared_trip_votes",
+                            "option_id=eq."+urllib.parse.quote(str(o["id"]))+
+                            "&voter_ref=eq."+urllib.parse.quote(actor["ref"]),
+                            {"vote":not bool(myvote.get("vote"))}
+                        )
                     else:
-                        execute("""INSERT OR REPLACE INTO trip_votes(option_id,voter_ref,voter_name,vote,created_at)
-                                   VALUES(?,?,?,?,?)""",(o["id"],ref,name,1,datetime.now().isoformat(timespec="seconds")))
+                        _shared_post(
+                            "chaplife_shared_trip_votes",
+                            {
+                                "option_id":o["id"],
+                                "voter_ref":actor["ref"],
+                                "voter_name":actor["name"],
+                                "vote":True,
+                                "created_at":datetime.now().isoformat(timespec="seconds")
+                            },
+                            "option_id,voter_ref"
+                        )
                     st.rerun()
-                comment=cc[1].text_input("Comment",key=f"comment_{o['id']}",label_visibility="collapsed",
-                                         placeholder="Add a quick comment")
-                if cc[2].button("Post",key=f"postcomment_{o['id']}") and comment.strip():
-                    # reuse vote row even if vote=0
-                    execute("""INSERT INTO trip_votes(option_id,voter_ref,voter_name,vote,comment,created_at)
-                               VALUES(?,?,?,?,?,?)
-                               ON CONFLICT(option_id,voter_ref) DO UPDATE SET comment=excluded.comment""",
-                            (o["id"],ref,name,1 if myvote else 0,comment.strip(),datetime.now().isoformat(timespec="seconds")))
-                    st.rerun()
-                comments=rows("SELECT voter_name,comment FROM trip_votes WHERE option_id=? AND COALESCE(comment,'')!=''",(o["id"],))
-                for cm in comments:
-                    st.caption(f"💬 {cm['voter_name']}: {cm['comment']}")
 
-                if str(trip["owner_user_id"])==ref or _trip_can_edit(trip):
-                    if st.button("Finalize this option",key=f"finalize_{o['id']}",use_container_width=True):
-                        # Use midpoint of range as provisional final total; owner can edit later in Final Budget.
-                        amount=((float(o["price_low"] or 0)+float(o["price_high"] or 0))/2
-                                if o["price_low"] and o["price_high"] else float(o["price_high"] or o["price_low"] or 0))
-                        people=_trip_member_count(trip["id"])
-                        personal=amount/people if o["price_basis"]=="Total" and people else amount
-                        execute("UPDATE trip_options SET status='Finalized' WHERE id=?",(o["id"],))
-                        execute("""INSERT INTO trip_budget_items(trip_id,option_id,label,total_amount,split_mode,personal_amount,created_at)
-                                   VALUES(?,?,?,?,?,?,?)""",
-                                (trip["id"],o["id"],f"{o['category']}: {o['title']}",amount,"Equal",personal,
-                                 datetime.now().isoformat(timespec="seconds")))
-                        _trip_sync_savings_goal(trip["id"])
+                comment=c[1].text_input(
+                    "Comment",
+                    value=(myvote or {}).get("comment") or "",
+                    key=f"shared_comment_{o['id']}",
+                    label_visibility="collapsed",
+                    placeholder="Add a quick comment"
+                )
+                if c[2].button("Post",key=f"post_shared_comment_{o['id']}"):
+                    _shared_post(
+                        "chaplife_shared_trip_votes",
+                        {
+                            "option_id":o["id"],
+                            "voter_ref":actor["ref"],
+                            "voter_name":actor["name"],
+                            "vote":bool((myvote or {}).get("vote")),
+                            "comment":comment.strip(),
+                            "created_at":datetime.now().isoformat(timespec="seconds")
+                        },
+                        "option_id,voter_ref"
+                    )
+                    st.rerun()
+
+                for v in votes:
+                    if str(v.get("comment") or "").strip():
+                        st.caption(f"💬 {v.get('voter_name') or 'Member'}: {v.get('comment')}")
+
+                if _shared_trip_can_edit(trip,actor):
+                    if o.get("status")=="Finalized":
+                        st.success("Finalized")
+                    elif st.button("Finalize this option",key=f"shared_finalize_{o['id']}",use_container_width=True):
+                        amount=((low+high)/2 if low and high else (high or low))
+                        _shared_patch(
+                            "chaplife_shared_trip_options",
+                            "id=eq."+urllib.parse.quote(str(o["id"])),
+                            {"status":"Finalized"}
+                        )
+                        _shared_post(
+                            "chaplife_shared_trip_budget_items",
+                            {
+                                "trip_id":trip["id"],
+                                "option_id":o["id"],
+                                "label":f"{o.get('category')}: {o.get('title')}",
+                                "total_amount":float(amount),
+                                "created_at":datetime.now().isoformat(timespec="seconds"),
+                                "updated_at":datetime.now().isoformat(timespec="seconds")
+                            },
+                            "trip_id,option_id"
+                        )
                         st.rerun()
 
+    # ----------------------- DECISIONS -----------------------
     with tabs[1]:
-        opts=rows("""SELECT o.*,COALESCE(v.cnt,0) AS votes FROM trip_options o
-                     LEFT JOIN (SELECT option_id,COUNT(*) cnt FROM trip_votes WHERE vote=1 GROUP BY option_id) v ON v.option_id=o.id
-                     WHERE o.trip_id=? ORDER BY o.category,votes DESC,o.id DESC""",(trip["id"],))
-        if not opts:
+        options=_shared_trip_options(trip["id"])
+        if not options:
             st.caption("No options to compare yet.")
         else:
             data=[]
-            for o in opts:
-                rng=""
-                if o["price_low"] and o["price_high"]: rng=f"${o['price_low']:,.0f}–${o['price_high']:,.0f}"
-                elif o["price_low"] or o["price_high"]: rng=f"${(o['price_low'] or o['price_high']):,.0f}"
-                data.append({"Category":o["category"],"Option":o["title"],"Votes":o["votes"],"Estimated":rng,"Status":o["status"]})
+            for o in options:
+                votes=_shared_trip_votes(o["id"])
+                vote_count=sum(1 for v in votes if bool(v.get("vote")))
+                low=float(o.get("price_low") or 0)
+                high=float(o.get("price_high") or 0)
+                rng=(f"${low:,.0f}–${high:,.0f}" if low and high else
+                     f"${(high or low):,.0f}" if (high or low) else "")
+                data.append({
+                    "Category":o.get("category"),
+                    "Option":o.get("title"),
+                    "Votes":vote_count,
+                    "Estimated":rng,
+                    "Status":o.get("status")
+                })
             st.dataframe(pd.DataFrame(data),hide_index=True,use_container_width=True)
 
+    # ----------------------- FINAL GROUP COST -----------------------
     with tabs[2]:
-        items=rows("SELECT * FROM trip_budget_items WHERE trip_id=? ORDER BY id",(trip["id"],))
+        items=_shared_trip_budget_items(trip["id"])
         if not items:
-            st.caption("Finalize an option and it will appear here.")
+            st.caption("Finalized trip choices will appear here.")
         for item in items:
             with st.container(border=True):
-                c=st.columns([3,1,1])
-                c[0].write(item["label"])
-                total=c[1].number_input("Final total",min_value=0.0,value=float(item["total_amount"] or 0),
-                                        step=10.0,key=f"trip_total_{item['id']}")
-                personal=c[2].number_input("Your share",min_value=0.0,value=float(item["personal_amount"] or 0),
-                                           step=10.0,key=f"trip_personal_{item['id']}")
-                if st.button("Update cost",key=f"trip_cost_update_{item['id']}"):
-                    execute("UPDATE trip_budget_items SET total_amount=?,personal_amount=? WHERE id=?",
-                            (float(total),float(personal),item["id"]))
-                    _trip_sync_savings_goal(trip["id"])
-                    st.rerun()
-        if items:
-            st.metric("Your finalized trip goal",f"${_trip_personal_total(trip['id']):,.2f}")
+                c=st.columns([3,1])
+                c[0].write(item.get("label") or "Trip item")
+                if _shared_trip_can_edit(trip,actor):
+                    total=c[1].number_input(
+                        "Final total",
+                        min_value=0.0,
+                        value=float(item.get("total_amount") or 0),
+                        step=10.0,
+                        key=f"central_final_cost_{item['id']}"
+                    )
+                    if st.button("Update Final Cost",key=f"update_central_final_{item['id']}"):
+                        _shared_patch(
+                            "chaplife_shared_trip_budget_items",
+                            "id=eq."+urllib.parse.quote(str(item["id"])),
+                            {
+                                "total_amount":float(total),
+                                "updated_at":datetime.now().isoformat(timespec="seconds")
+                            }
+                        )
+                        st.rerun()
+                else:
+                    c[1].metric("Final cost",f"${float(item.get('total_amount') or 0):,.2f}")
 
+        final_total=_shared_trip_final_total(trip["id"])
+        if items:
+            st.metric("Finalized group trip cost",f"${final_total:,.2f}")
+            people=_shared_trip_people_count(trip["id"])
+            st.caption(f"Current equal-share estimate: ${final_total/max(1,people):,.2f} each across {people} traveler(s).")
+
+    # ----------------------- PRIVATE MONEY CHOICE -----------------------
     with tabs[3]:
-        _trip_sync_savings_goal(trip["id"])
-        link=rows("SELECT * FROM trip_savings_links WHERE trip_id=?",(trip["id"],))
-        if link:
-            link=link[0]
-            st.metric("Your trip savings goal",f"${float(link['target_amount'] or 0):,.2f}")
-            st.metric("Suggested per paycheck",f"${float(link['per_paycheck'] or 0):,.2f}")
-            if trip["start_date"]:
-                st.caption(f"Target date: {us_date(trip['start_date'])}")
-            st.success("This trip is linked to your Finance savings goals.")
+        st.markdown("### Your private trip money plan")
+        st.caption(
+            "Only you can see what you connect to your Finance section. "
+            "The trip creator and other travelers do not see your paychecks, balances, or savings account."
+        )
+
+        pref=_private_trip_pref(trip["id"]) or {}
+        final_total=_shared_trip_final_total(trip["id"])
+        people=_shared_trip_people_count(trip["id"])
+        equal_share=(final_total/max(1,people)) if final_total else 0
+
+        if final_total:
+            c=st.columns(3)
+            c[0].metric("Final group cost",f"${final_total:,.2f}")
+            c[1].metric("Equal share",f"${equal_share:,.2f}")
+            c[2].metric("Travelers used",str(people))
         else:
-            st.caption("Finalize trip costs to create a savings plan.")
+            st.info(
+                "The trip is still being planned. You can start saving now using your own planning amount, "
+                "or wait until choices are finalized."
+            )
+
+        connected=st.toggle(
+            "Connect this trip to my Finance",
+            value=bool(pref.get("connected")),
+            key=f"connect_shared_trip_{trip['id']}"
+        )
+
+        timing_opts=["Start saving now","Wait until finalized"]
+        timing_default=pref.get("timing_choice") or "Wait until finalized"
+        timing=st.radio(
+            "When should ChapLife start budgeting for it?",
+            timing_opts,
+            horizontal=True,
+            index=timing_opts.index(timing_default) if timing_default in timing_opts else 1,
+            key=f"shared_trip_timing_{trip['id']}"
+        )
+
+        portion_opts=["Equal share","Percentage of trip total","Custom amount","Full trip total"]
+        portion_default=pref.get("portion_type") or "Equal share"
+        portion=st.selectbox(
+            "What portion belongs in your budget?",
+            portion_opts,
+            index=portion_opts.index(portion_default) if portion_default in portion_opts else 0,
+            key=f"shared_trip_portion_{trip['id']}"
+        )
+
+        portion_value=float(pref.get("portion_value") or 0)
+        planning_amount=float(pref.get("planning_amount") or 0)
+
+        if portion=="Percentage of trip total":
+            portion_value=st.number_input(
+                "Your percentage",
+                min_value=0.0,max_value=100.0,
+                value=min(100.0,max(0.0,portion_value or 25.0)),
+                step=5.0,
+                key=f"shared_trip_percent_{trip['id']}"
+            )
+        elif portion=="Custom amount" and final_total:
+            portion_value=st.number_input(
+                "Amount to put in your budget",
+                min_value=0.0,
+                value=max(0.0,portion_value),
+                step=25.0,
+                key=f"shared_trip_custom_{trip['id']}"
+            )
+
+        if timing=="Start saving now" and not final_total:
+            planning_amount=st.number_input(
+                "Your planning savings goal for now",
+                min_value=0.0,
+                value=max(0.0,planning_amount),
+                step=50.0,
+                help="This is your temporary personal estimate. You can replace it with your finalized share later.",
+                key=f"shared_trip_planning_amount_{trip['id']}"
+            )
+
+        preview=_trip_target_from_choice(
+            final_total,people,portion,portion_value,planning_amount
+        )
+        if timing=="Wait until finalized" and not final_total:
+            preview=0
+
+        if preview:
+            st.metric("Amount ChapLife would budget for you",f"${preview:,.2f}")
+            st.caption(
+                f"Suggested savings: ${_trip_per_paycheck(preview,trip.get('start_date')):,.2f} per paycheck "
+                f"toward {us_date(trip.get('start_date')) if trip.get('start_date') else 'the trip'}."
+            )
+        elif connected and timing=="Wait until finalized":
+            st.caption("ChapLife will wait for finalized costs before creating your savings amount.")
+
+        c=st.columns(2)
+        if c[0].button("Save My Money Plan",key=f"save_shared_money_{trip['id']}",use_container_width=True):
+            target,per=_save_private_trip_finance(
+                trip,connected,timing,portion,portion_value,planning_amount
+            )
+            if connected and target>0:
+                st.success(
+                    f"${target:,.2f} is now connected to your Finance savings plan "
+                    f"(${per:,.2f} suggested per paycheck)."
+                )
+            elif connected:
+                st.success("Saved. ChapLife will add the amount when the trip is finalized.")
+            else:
+                st.success("This trip is not connected to your Finance.")
+            st.rerun()
+
+        if c[1].button("Remove From My Finance",key=f"remove_shared_money_{trip['id']}",use_container_width=True):
+            _save_private_trip_finance(
+                trip,False,"Wait until finalized","Equal share",0,0
+            )
+            st.success("Removed from your private Finance plan.")
+            st.rerun()
+
 
 def user_access_center():
     st.title("👤 Profile")
@@ -694,7 +1195,7 @@ def user_access_center():
         return
     is_member=bool(st.session_state.get("_chaplife_member_id"))
 
-    st.write("Make ChapLife feel like yours. Your photo, display name, and color theme are personal to your account.")
+    st.write("Make ChapLife feel like yours. Your photo and display name are personal to your account.")
 
     st.subheader("About Me")
     c=st.columns([1,2])
@@ -746,14 +1247,6 @@ def user_access_center():
             workout_goal=st.text_input("Main fitness / workout goal",value=workout_goal_saved,
                                        placeholder="Lose weight, build strength, improve stamina…")
 
-            theme_opts=["Lavender","Ocean","Rose","Emerald","Sunset","Midnight","Neutral"]
-            current_theme=get_setting("profile_theme","Lavender")
-            theme=st.selectbox(
-                "My ChapLife color theme",
-                theme_opts,
-                index=theme_opts.index(current_theme) if current_theme in theme_opts else 0,
-                help="This changes only your ChapLife. Other people keep their own theme."
-            )
             bio=st.text_area("Short bio (optional)",value=u.get("bio") or "",height=90)
             visible=st.toggle("Allow my profile to be visible in future social features",
                               value=bool(u.get("profile_visible",False)))
@@ -779,7 +1272,6 @@ def user_access_center():
                                 (username.strip() or None,bio,1 if visible else 0,
                                  datetime.now().isoformat(timespec="seconds"),u["id"]))
                     set_setting("profile_display_name",display.strip())
-                    set_setting("profile_theme",theme)
                     set_setting("profile_gender",gender_custom.strip() if gender=="Custom" and gender_custom.strip() else gender)
                     set_setting("profile_birthdate",birthdate.strip())
                     set_setting("profile_height",height.strip())
@@ -1209,6 +1701,22 @@ def init_db():
         current_amount REAL DEFAULT 0,
         per_paycheck REAL DEFAULT 0,
         note TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS shared_trip_finance_preferences (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        cloud_trip_id TEXT UNIQUE,
+        trip_name TEXT,
+        target_date TEXT,
+        connected INTEGER DEFAULT 0,
+        timing_choice TEXT DEFAULT 'Wait until finalized',
+        portion_type TEXT DEFAULT 'Equal share',
+        portion_value REAL DEFAULT 0,
+        planning_amount REAL DEFAULT 0,
+        target_amount REAL DEFAULT 0,
+        per_paycheck REAL DEFAULT 0,
+        savings_goal_id INTEGER,
+        updated_at TEXT
     );
 CREATE TABLE IF NOT EXISTS feature_requests (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2204,6 +2712,19 @@ def _dashboard_insights():
 def home():
     personal_header()
 
+    dashboard_details={
+        "Finances":["✅ Finance tracking is ready","✅ Bill and paycheck tools are set up","🔧 Log a few transactions for a spending insight"],
+        "Trips":["✈️ Create or join a trip","🗳️ Share ideas and vote together","🎯 Turn final costs into a savings plan"],
+        "Food & Nutrition":["🥗 Plan meals around your goals","🧾 Keep food choices organized","✨ Build routines that fit your life"],
+        "Grocery Shopping":["🛒 Build and manage grocery lists","🥦 Keep food planning connected","✅ Check off what you buy"],
+        "My Trainer":["🏋🏾‍♀️ Build a workout for today, a week, or a month","📍 Choose your gym or home equipment","🎥 Use exercise demonstrations"],
+        "Water & Jug Puzzles":["💧 Track water through the day","🧩 Play your jug puzzles","🎯 Keep working toward your daily goal"],
+        "Vocabulary":["📖 Practice and save vocabulary","🧠 Review words at your pace","✨ Keep building your word bank"],
+        "Career Simulator":["🏗️ Practice realistic project-coordination tasks","📥 Work through inbox and task scenarios","🎓 Use guided training mode"],
+        "Health & Life":["❤️ Keep personal health and life tools together","📅 Track routines and wellness information","🔒 Your information stays private"]
+    }
+
+
     today=date.today().isoformat()
     water=sum(r['ounces'] for r in rows('SELECT ounces FROM water_log WHERE log_date=?',(today,)))
     water_goal=safe_float(get_setting('water_goal',64))
@@ -3120,21 +3641,32 @@ def finances():
             print('ChapLife Finance tab 3 error:', repr(_finance_tab_error))
             st.warning('This section needs a compatibility update. The rest of Finance is still available from the menu above.')
     if section=="🏦 Savings":
+
         try:
-            triplinks=rows("""SELECT tsl.*,t.name,t.start_date FROM trip_savings_links tsl
-                              JOIN trips t ON t.id=tsl.trip_id
-                              ORDER BY COALESCE(t.start_date,'9999-12-31')""")
-            if triplinks:
-                st.subheader("✈️ Trip-linked savings")
-                for tl in triplinks:
+            shared_trip_goals=rows(
+                """SELECT * FROM shared_trip_finance_preferences
+                   WHERE connected=1
+                   ORDER BY COALESCE(target_date,'9999-12-31')"""
+            )
+            if shared_trip_goals:
+                st.subheader("✈️ My Trip Savings")
+                for tg in shared_trip_goals:
                     with st.container(border=True):
-                        st.write(f"**{tl['name']}**")
-                        c=st.columns(2)
-                        c[0].metric("Goal",f"${float(tl['target_amount'] or 0):,.2f}")
-                        c[1].metric("Per paycheck",f"${float(tl['per_paycheck'] or 0):,.2f}")
+                        st.write(f"**{tg['trip_name'] or 'Shared Trip'}**")
+                        c=st.columns(3)
+                        c[0].metric("My goal",f"${float(tg['target_amount'] or 0):,.2f}")
+                        c[1].metric("Suggested / paycheck",f"${float(tg['per_paycheck'] or 0):,.2f}")
+                        c[2].write(
+                            f"Target: {us_date(tg['target_date'])}"
+                            if tg["target_date"] else "Target date not set"
+                        )
+                        if not float(tg["target_amount"] or 0):
+                            st.caption("Waiting for the trip costs to be finalized.")
                 st.divider()
         except Exception:
             pass
+
+
 
         try:
             st.subheader("🏦 Savings")
@@ -6475,6 +7007,39 @@ def health():
 # ---------- Settings ----------
 def settings_page():
     st.title('⚙️ Settings')
+
+    st.subheader("🎨 Appearance")
+    st.caption("Choose how your ChapLife looks. This only changes your account.")
+
+    theme_opts=["Lavender","Ocean","Rose","Emerald","Sunset","Midnight","Neutral"]
+    current_theme=get_setting("profile_theme","Lavender")
+    theme_cols=st.columns(4)
+    theme_preview={
+        "Lavender":"💜 Lavender",
+        "Ocean":"🌊 Ocean",
+        "Rose":"🌹 Rose",
+        "Emerald":"🌿 Emerald",
+        "Sunset":"🌅 Sunset",
+        "Midnight":"🌙 Midnight",
+        "Neutral":"🤍 Neutral"
+    }
+
+    selected_theme=st.radio(
+        "Color theme",
+        theme_opts,
+        index=theme_opts.index(current_theme) if current_theme in theme_opts else 0,
+        format_func=lambda x:theme_preview[x],
+        horizontal=True,
+        key="settings_theme_choice"
+    )
+
+    if st.button("Save My Theme",use_container_width=True,key="save_personal_theme"):
+        set_setting("profile_theme",selected_theme)
+        st.success(f"{selected_theme} theme saved.")
+        st.rerun()
+
+    st.divider()
+
     st.caption('Control what ChapLife shows, how planning works, and future account integrations.')
 
     tabs=st.tabs(['Display & Progress','📅 Calendar','🥗 Meal Planning','🏋🏾‍♀️ Workout Planning','❤️ Health','Data & Privacy'])
