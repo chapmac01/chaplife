@@ -21,7 +21,7 @@ def current_db_path():
 
 st.set_page_config(page_title='ChapLife', page_icon='✨', layout='wide', initial_sidebar_state='collapsed')
 
-BUILD_VERSION='ChapLife 7.2.4 · Shared Trips + Private Budget Choice'
+BUILD_VERSION='ChapLife 7.2.6 · Owner Access Recovery'
 
 st.markdown('''
 <style>
@@ -621,6 +621,100 @@ def _refresh_private_trip_finance_if_needed(trip):
             pref.get("planning_amount") or 0
         )
 
+
+def _trip_calendar_dates(trip):
+    start_raw=str(trip.get("start_date") or "").strip()
+    end_raw=str(trip.get("end_date") or start_raw).strip()
+    try:
+        start=datetime.strptime(start_raw,"%Y-%m-%d").date()
+    except Exception:
+        return None,None
+    try:
+        end=datetime.strptime(end_raw,"%Y-%m-%d").date()
+    except Exception:
+        end=start
+    if end < start:
+        end=start
+    return start,end
+
+def _trip_calendar_description(trip):
+    bits=["Shared ChapLife trip"]
+    if trip.get("destination"):
+        bits.append("Destination: "+str(trip.get("destination")))
+    if trip.get("departure_city"):
+        bits.append("Leaving from: "+str(trip.get("departure_city")))
+    if trip.get("owner_name"):
+        bits.append("Trip creator: "+str(trip.get("owner_name")))
+    if trip.get("status"):
+        bits.append("Planning stage: "+str(trip.get("status")))
+    if trip.get("notes"):
+        bits.append("")
+        bits.append(str(trip.get("notes")))
+    return "\n".join(bits)
+
+def _trip_google_calendar_url(trip):
+    start,end=_trip_calendar_dates(trip)
+    if not start:
+        return ""
+    # Google all-day events use an exclusive end date.
+    end_exclusive=end+timedelta(days=1)
+    title=str(trip.get("name") or "ChapLife Trip")
+    details=_trip_calendar_description(trip)
+    location=str(trip.get("destination") or "")
+    params={
+        "action":"TEMPLATE",
+        "text":title,
+        "dates":start.strftime("%Y%m%d")+"/"+end_exclusive.strftime("%Y%m%d"),
+        "details":details,
+        "location":location
+    }
+    return "https://calendar.google.com/calendar/render?"+urllib.parse.urlencode(params)
+
+def _ics_escape(value):
+    s=str(value or "")
+    return (s.replace("\\","\\\\")
+             .replace(";","\\;")
+             .replace(",","\\,")
+             .replace("\r\n","\\n")
+             .replace("\n","\\n")
+             .replace("\r","\\n"))
+
+def _trip_ics_bytes(trip):
+    start,end=_trip_calendar_dates(trip)
+    if not start:
+        return b""
+    end_exclusive=end+timedelta(days=1)
+    title=_ics_escape(trip.get("name") or "ChapLife Trip")
+    desc=_ics_escape(_trip_calendar_description(trip))
+    location=_ics_escape(trip.get("destination") or "")
+    uid=f"chaplife-trip-{trip.get('id')}@chaplife"
+    stamp=datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    ics=(
+        "BEGIN:VCALENDAR\r\n"
+        "VERSION:2.0\r\n"
+        "PRODID:-//ChapLife//Shared Trips//EN\r\n"
+        "CALSCALE:GREGORIAN\r\n"
+        "METHOD:PUBLISH\r\n"
+        "BEGIN:VEVENT\r\n"
+        f"UID:{uid}\r\n"
+        f"DTSTAMP:{stamp}\r\n"
+        f"DTSTART;VALUE=DATE:{start.strftime('%Y%m%d')}\r\n"
+        f"DTEND;VALUE=DATE:{end_exclusive.strftime('%Y%m%d')}\r\n"
+        f"SUMMARY:{title}\r\n"
+        f"DESCRIPTION:{desc}\r\n"
+        f"LOCATION:{location}\r\n"
+        "TRANSP:OPAQUE\r\n"
+        "STATUS:CONFIRMED\r\n"
+        "END:VEVENT\r\n"
+        "END:VCALENDAR\r\n"
+    )
+    return ics.encode("utf-8")
+
+def _safe_calendar_filename(trip):
+    raw=str(trip.get("name") or "ChapLife Trip")
+    safe=re.sub(r"[^A-Za-z0-9 _-]+","",raw).strip().replace(" ","_")
+    return (safe or "ChapLife_Trip")+".ics"
+
 def trips_page():
     st.title("✈️ Trips")
     st.caption(
@@ -728,6 +822,53 @@ def trips_page():
         c[1].metric("Planning",trip.get("planning_mode") or "Owner only")
         c[2].metric("People",_shared_trip_people_count(trip["id"]))
         c[3].metric("Your Finance Goal",f"${personal_target:,.2f}" if personal_target else "Not connected")
+
+
+    # ----------------------- PERSONAL CALENDAR -----------------------
+    with st.expander("📅 Add this trip to my calendar",expanded=False):
+        trip_start,trip_end=_trip_calendar_dates(trip)
+        if not trip_start:
+            st.info("Add trip dates before putting this trip on a calendar.")
+        else:
+            st.write(
+                f"**{trip.get('name') or 'Trip'}** · "
+                f"{trip_start.strftime('%m/%d/%Y')}–{trip_end.strftime('%m/%d/%Y')}"
+            )
+            if trip.get("destination"):
+                st.caption(str(trip.get("destination")))
+
+            st.caption(
+                "This adds the trip only to your calendar. "
+                "It does not add anything to another traveler's calendar."
+            )
+
+            google_url=_trip_google_calendar_url(trip)
+            c=st.columns(2)
+            if google_url:
+                c[0].link_button(
+                    "📅 Add to Google Calendar",
+                    google_url,
+                    use_container_width=True
+                )
+            c[1].download_button(
+                "🗓️ Apple / Outlook / Other",
+                data=_trip_ics_bytes(trip),
+                file_name=_safe_calendar_filename(trip),
+                mime="text/calendar",
+                use_container_width=True,
+                key=f"trip_ics_{trip['id']}"
+            )
+
+            if google_calendar_connected():
+                st.caption(
+                    "Your Google Calendar connection is currently used by ChapLife for reading/planning. "
+                    "The button above opens this trip pre-filled in Google Calendar so you can review and save it."
+                )
+            else:
+                st.caption(
+                    "No Google connection is required for either option. "
+                    "Google opens a pre-filled event; the calendar file works with Apple Calendar, Outlook, and other calendar apps."
+                )
 
     # ----------------------- CREATOR CONTROLS -----------------------
     if _shared_trip_is_owner(trip,actor):
@@ -2194,30 +2335,53 @@ def cloud_auth_gate():
 
         if mode=="Sign in":
             with st.form("simple_member_signin"):
-                login=st.text_input("Name or username",placeholder="Your full name or username")
+                login=st.text_input(
+                    "Name, username, or email",
+                    placeholder="Your full name, username, or email"
+                )
                 password=st.text_input("Password",type="password")
                 go=st.form_submit_button("Enter ChapLife",use_container_width=True)
                 if go:
-                    person=_central_member_by_name_or_username(login)
-                    if not person:
-                        st.error("I couldn't find that ChapLife account.")
-                    elif person.get("status")=="pending":
-                        st.info("Your access request is still waiting for approval.")
-                    elif person.get("status")=="rejected":
-                        st.error("This access request was not approved.")
-                    elif not person.get("active",True):
-                        st.error("This account is currently disabled.")
-                    elif person.get("status") in ("preapproved",) or not person.get("password_hash"):
-                        st.info("Use **First time / Reset** above with the shared access code to create your password.")
-                    elif person.get("status")!="approved":
-                        st.error("This account is not ready to sign in yet.")
-                    elif not _member_password_ok(password,person.get("password_hash","")):
-                        st.error("That password doesn't match.")
+                    login_value=str(login or "").strip()
+                    person=_central_member_by_name_or_username(login_value)
+
+                    # Normal ChapLife member sign-in.
+                    if person:
+                        if person.get("status")=="pending":
+                            st.info("Your access request is still waiting for approval.")
+                        elif person.get("status")=="rejected":
+                            st.error("This access request was not approved.")
+                        elif not person.get("active",True):
+                            st.error("This account is currently disabled.")
+                        elif person.get("status") in ("preapproved",) or not person.get("password_hash"):
+                            st.info("Use **First time / Reset** above with the shared access code to create your password.")
+                        elif person.get("status")!="approved":
+                            st.error("This account is not ready to sign in yet.")
+                        elif not _member_password_ok(password,person.get("password_hash","")):
+                            st.error("That password doesn't match.")
+                        else:
+                            st.session_state["_chaplife_member_id"]=person["id"]
+                            st.session_state["_chaplife_member_profile"]=person
+                            st.session_state["_cloud_loaded"]=False
+                            st.rerun()
                     else:
-                        st.session_state["_chaplife_member_id"]=person["id"]
-                        st.session_state["_chaplife_member_profile"]=person
-                        st.session_state["_cloud_loaded"]=False
-                        st.rerun()
+                        # Owner recovery uses the SAME sign-in screen.
+                        # If the entry is the owner's Supabase email, authenticate
+                        # against the existing private cloud account instead of
+                        # requiring a separate public "Owner Sign In" section.
+                        try:
+                            owner_auth=cloud_sign_in(login_value,password)
+                        except Exception:
+                            owner_auth=None
+
+                        if owner_auth and owner_auth.get("access_token") and owner_auth.get("user"):
+                            st.session_state["_chaplife_cloud_session"]=owner_auth
+                            st.session_state.pop("_chaplife_member_id",None)
+                            st.session_state.pop("_chaplife_member_profile",None)
+                            st.session_state["_cloud_loaded"]=False
+                            st.rerun()
+                        else:
+                            st.error("I couldn't sign you in with those details.")
 
         else:
             with st.form("simple_first_access"):
