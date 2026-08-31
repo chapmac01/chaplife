@@ -8189,22 +8189,37 @@ def progress():
         st.write(f"**Cycle entries logged:** {len(cycles)}")
 
 
-def friendly_app_error(section="this section"):
-    """Never expose raw Python/Streamlit tracebacks to the normal ChapLife screen."""
-    import traceback
-    err=traceback.format_exc()
-    # Log full details to Streamlit Cloud logs only.
+def friendly_app_error(section="this section", exc=None, traceback_text=None):
+    """Hide technical details from the UI while reliably logging the real failure."""
+    import sys, traceback, datetime
+    if traceback_text is None:
+        if exc is not None:
+            traceback_text="".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+        else:
+            traceback_text=traceback.format_exc()
+    if not traceback_text or traceback_text.strip()=="NoneType: None":
+        traceback_text=f"{type(exc).__name__}: {exc}" if exc is not None else "No traceback was captured."
+
+    # stderr + flush makes the traceback reliably appear in Streamlit Community Cloud logs.
     try:
-        print(f"[ChapLife error · {section}]\n{err}")
+        stamp=datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        print(
+            f"\\n[LifeMode ERROR START] {stamp} | section={section}\\n"
+            f"{traceback_text}"
+            f"[LifeMode ERROR END] section={section}\\n",
+            file=sys.stderr,
+            flush=True,
+        )
     except Exception:
         pass
+
     st.error(f"Something in {section} didn’t load correctly.")
     st.write("Your saved data is still protected.")
     st.caption("Technical details are hidden from normal view.")
     c=st.columns(2)
-    if c[0].button("↻ Try again",use_container_width=True,key=f"friendly_retry_{re.sub(r'[^a-z0-9]+','_',str(section).lower())}"):
+    if c[0].button("↻ Try again",width="stretch",key=f"friendly_retry_{re.sub(r'[^a-z0-9]+','_',str(section).lower())}"):
         st.rerun()
-    if c[1].button("🏠 Go Home",use_container_width=True,key=f"friendly_home_{re.sub(r'[^a-z0-9]+','_',str(section).lower())}"):
+    if c[1].button("🏠 Go Home",width="stretch",key=f"friendly_home_{re.sub(r'[^a-z0-9]+','_',str(section).lower())}"):
         st.session_state.page="Home"
         st.rerun()
 
@@ -8238,17 +8253,31 @@ _renderers={
 }
 try:
     _renderers.get(page,home)()
-except Exception:
+except Exception as page_error:
+    # Capture NOW, while the original exception context is guaranteed to exist.
+    import traceback as _lifemode_traceback
+    _page_traceback="".join(
+        _lifemode_traceback.format_exception(
+            type(page_error), page_error, page_error.__traceback__
+        )
+    )
     try:
-        friendly_app_error(page)
+        friendly_app_error(page, exc=page_error, traceback_text=_page_traceback)
     except Exception as fallback_error:
-        # Absolute last resort: no traceback on user screen.
+        # Absolute last resort: keep the UI clean but force both errors into Cloud logs.
         try:
-            import traceback
-            print("[ChapLife fallback error]\n"+traceback.format_exc())
+            import sys, traceback as _fallback_traceback
+            print(
+                f"\\n[LifeMode FALLBACK ERROR] section={page}\\n"
+                f"ORIGINAL PAGE ERROR:\\n{_page_traceback}\\n"
+                f"ERROR WHILE RENDERING FRIENDLY SCREEN:\\n"
+                f"{''.join(_fallback_traceback.format_exception(type(fallback_error), fallback_error, fallback_error.__traceback__))}",
+                file=sys.stderr,
+                flush=True,
+            )
         except Exception:
             pass
         st.error("Something didn’t load correctly.")
-        if st.button("🏠 Return Home",use_container_width=True,key="absolute_home"):
+        if st.button("🏠 Return Home",width="stretch",key="absolute_home"):
             st.session_state.page="Home"
             st.rerun()
