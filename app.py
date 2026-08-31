@@ -21,7 +21,106 @@ def current_db_path():
 
 st.set_page_config(page_title='ChapLife', page_icon='✨', layout='wide', initial_sidebar_state='collapsed')
 
-BUILD_VERSION='ChapLife 7.2.10 · Full Affirm Klarna Wallet Restore'
+BUILD_VERSION='ChapLife 7.2.13 · Personal Go-To Meals + Google Restaurant Nutrition'
+
+# Optional Google lookup keys for restaurant/nutrition tools.
+GOOGLE_MAPS_API_KEY=str(st.secrets.get("GOOGLE_MAPS_API_KEY","") or "").strip()
+GOOGLE_SEARCH_API_KEY=str(st.secrets.get("GOOGLE_SEARCH_API_KEY","") or "").strip()
+GOOGLE_SEARCH_CX=str(st.secrets.get("GOOGLE_SEARCH_CX","") or "").strip()
+
+def _food_extra_enabled(key):
+    # Owner keeps her established go-to tools. Members opt in from Settings.
+    if _is_owner():
+        return True
+    return bool(get_setting(f"extra_feature_{key}",False))
+
+def _google_json(url,headers=None,timeout=12):
+    req=urllib.request.Request(url,headers=headers or {"User-Agent":"ChapLife/1.0"})
+    with urllib.request.urlopen(req,timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+def google_place_lookup(query):
+    """Use Google Places Text Search when configured."""
+    q=str(query or "").strip()
+    if not q or not GOOGLE_MAPS_API_KEY:
+        return []
+    try:
+        url=(
+            "https://maps.googleapis.com/maps/api/place/textsearch/json?"
+            +urllib.parse.urlencode({"query":q,"key":GOOGLE_MAPS_API_KEY})
+        )
+        data=_google_json(url)
+        out=[]
+        for p in (data.get("results") or [])[:6]:
+            out.append({
+                "name":p.get("name") or q,
+                "address":p.get("formatted_address") or "",
+                "place_id":p.get("place_id") or "",
+                "rating":p.get("rating"),
+            })
+        return out
+    except Exception as e:
+        print("ChapLife Google Places lookup error:",repr(e))
+        return []
+
+def google_nutrition_search(restaurant,item,customizations=""):
+    """Search Google Programmable Search and extract calorie values from returned snippets.
+    We show the source; we do not silently treat a snippet as authoritative.
+    """
+    restaurant=str(restaurant or "").strip()
+    item=str(item or "").strip()
+    customizations=str(customizations or "").strip()
+    if not restaurant or not item or not GOOGLE_SEARCH_API_KEY or not GOOGLE_SEARCH_CX:
+        return []
+    query=f'{restaurant} "{item}" calories nutrition'
+    if customizations:
+        query += " "+customizations
+    try:
+        url="https://www.googleapis.com/customsearch/v1?"+urllib.parse.urlencode({
+            "key":GOOGLE_SEARCH_API_KEY,
+            "cx":GOOGLE_SEARCH_CX,
+            "q":query,
+            "num":8
+        })
+        data=_google_json(url)
+        results=[]
+        seen=set()
+        patterns=[
+            r'(?i)\b(\d{2,4})\s*(?:calories|calorie|kcal)\b',
+            r'(?i)\bcalories?\s*[:\-]?\s*(\d{2,4})\b',
+        ]
+        for hit in data.get("items") or []:
+            title=hit.get("title") or ""
+            snippet=hit.get("snippet") or ""
+            link=hit.get("link") or ""
+            calories=[]
+            for pat in patterns:
+                calories += [int(x) for x in re.findall(pat,title+" "+snippet)]
+            for cal in calories:
+                if cal<10 or cal>5000: 
+                    continue
+                key=(cal,link)
+                if key in seen:
+                    continue
+                seen.add(key)
+                domain=""
+                try: domain=urllib.parse.urlparse(link).netloc.replace("www.","")
+                except: pass
+                official_hint=restaurant.lower().replace(" ","") in domain.lower().replace("-","")
+                results.append({
+                    "calories":cal,
+                    "title":title,
+                    "snippet":snippet,
+                    "url":link,
+                    "domain":domain,
+                    "official_hint":official_hint
+                })
+        results.sort(key=lambda r:(not r["official_hint"],r["calories"]))
+        return results[:10]
+    except Exception as e:
+        print("ChapLife Google nutrition lookup error:",repr(e))
+        return []
+
 
 st.markdown('''
 <style>
@@ -345,6 +444,13 @@ def personal_header():
             </div>''',
         unsafe_allow_html=True
     )
+
+
+def _extra_feature_enabled(feature_key):
+    """Owner keeps ChapLife's full toolset; regular members opt into extras."""
+    if _is_owner():
+        return True
+    return bool(get_setting(f"extra_feature_{feature_key}",False))
 
 def _provider_name(provider_key, fallback):
     u=_current_user()
@@ -960,201 +1066,316 @@ def trips_page():
                     "Google opens a pre-filled event; the calendar file works with Apple Calendar, Outlook, and other calendar apps."
                 )
 
-    # ----------------------- CREATOR CONTROLS -----------------------
-    if _shared_trip_is_owner(trip,actor):
-        with st.expander("👑 Trip creator controls",expanded=False):
-            st.markdown("#### Who can see this trip")
-            st.caption(
-                "Invite people who already have an approved ChapLife account. "
-                "Once added, the trip appears in their Trips section."
-            )
+    # ----------------------- CREATOR / EDITOR CONTROLS -----------------------
+    if _shared_trip_is_owner(trip,actor) or _shared_trip_can_edit(trip,actor):
+        owner_view=_shared_trip_is_owner(trip,actor)
+        with st.expander("👑 Trip creator controls" if owner_view else "✏️ Trip editing controls",expanded=False):
+            st.markdown("#### ✏️ Edit trip information")
 
             try:
-                approved=_admin_http_json(
-                    "/rest/v1/chaplife_members?status=eq.approved&active=eq.true"
-                    "&select=id,display_name,username&order=display_name.asc"
-                )
+                current_start=datetime.strptime(str(trip.get("start_date")),"%Y-%m-%d").date() if trip.get("start_date") else date.today()
             except Exception:
-                approved=[]
+                current_start=date.today()
 
-            current_member_ids={str(m.get("member_id")) for m in members if m.get("member_id")}
-            choices={
-                str(m["id"]):(m.get("display_name") or m.get("username") or "ChapLife user")
-                for m in approved
-                if str(m["id"])!=str(actor.get("member_id") or "")
-                and str(m["id"]) not in current_member_ids
-            }
-            invite_ids=st.multiselect(
-                "Add people from ChapLife",
-                list(choices.keys()),
-                format_func=lambda x:choices[x],
-                key=f"central_trip_invites_{trip['id']}"
-            )
-            if st.button("Add Selected People",key=f"add_shared_people_{trip['id']}",use_container_width=True):
-                for mid in invite_ids:
-                    _shared_post(
-                        "chaplife_shared_trip_members",
-                        {
-                            "trip_id":trip["id"],
-                            "member_id":mid,
-                            "member_name":choices[mid],
-                            "rsvp":"Invited",
-                            "role":"Member",
-                            "can_suggest":trip.get("planning_mode")!="Owner only",
-                            "can_edit":trip.get("planning_mode")=="Everyone can edit"
-                        },
-                        "trip_id,member_id"
-                    )
-                st.success("They can now see this trip in ChapLife.")
-                st.rerun()
+            try:
+                current_end=datetime.strptime(str(trip.get("end_date")),"%Y-%m-%d").date() if trip.get("end_date") else current_start
+            except Exception:
+                current_end=current_start
 
-            st.markdown("#### People on this trip")
-            members=_shared_trip_members(trip["id"])
-            if not members and actor["is_owner"]:
-                st.caption(f"👑 {actor['name']} — Creator")
-            for m in members:
-                cols=st.columns([3,1,1])
-                crown="👑 " if m.get("role")=="Owner" else ""
-                cols[0].write(f"{crown}{m.get('member_name') or 'ChapLife user'} · {m.get('rsvp') or 'Invited'}")
-                if m.get("role")!="Owner":
-                    if cols[1].button("Remove",key=f"remove_shared_member_{trip['id']}_{m['member_id']}"):
-                        _shared_delete(
-                            "chaplife_shared_trip_members",
-                            "trip_id=eq."+urllib.parse.quote(str(trip["id"]))+
-                            "&member_id=eq."+urllib.parse.quote(str(m["member_id"]))
-                        )
-                        st.rerun()
-                    canedit=bool(m.get("can_edit"))
-                    if cols[2].button(
-                        "Editor ✓" if canedit else "Can edit",
-                        key=f"shared_edit_perm_{trip['id']}_{m['member_id']}"
-                    ):
-                        _shared_patch(
-                            "chaplife_shared_trip_members",
-                            "trip_id=eq."+urllib.parse.quote(str(trip["id"]))+
-                            "&member_id=eq."+urllib.parse.quote(str(m["member_id"])),
-                            {"can_edit":not canedit}
-                        )
-                        st.rerun()
-
-            st.divider()
-            mode_opts=["Owner only","Everyone can suggest","Everyone can edit"]
-            stage_opts=["Ideas","Voting","Finalized","Saving","Ready ✈️"]
-            mode=st.selectbox(
-                "Planning control",
-                mode_opts,
-                index=mode_opts.index(trip.get("planning_mode")) if trip.get("planning_mode") in mode_opts else 0,
-                key=f"shared_trip_mode_{trip['id']}"
-            )
-            stage=st.selectbox(
-                "Trip stage",
-                stage_opts,
-                index=stage_opts.index(trip.get("status")) if trip.get("status") in stage_opts else 0,
-                key=f"shared_trip_stage_{trip['id']}"
-            )
-            if st.button("Save Trip Controls",key=f"save_shared_controls_{trip['id']}",use_container_width=True):
-                _shared_patch(
-                    "chaplife_shared_trips",
-                    "id=eq."+urllib.parse.quote(str(trip["id"])),
-                    {
-                        "planning_mode":mode,
-                        "status":stage,
-                        "updated_at":datetime.now().isoformat(timespec="seconds")
-                    }
+            with st.form(f"edit_trip_details_{trip['id']}"):
+                c1,c2=st.columns(2)
+                edit_name=c1.text_input(
+                    "Trip name",
+                    value=trip.get("name") or "",
+                    key=f"edit_trip_name_{trip['id']}"
                 )
-                # Keep default permissions aligned with the selected mode.
-                for m in _shared_trip_members(trip["id"]):
-                    if m.get("role")!="Owner":
+                edit_destination=c2.text_input(
+                    "Destination",
+                    value=trip.get("destination") or "",
+                    key=f"edit_trip_destination_{trip['id']}"
+                )
+
+                edit_departure=st.text_input(
+                    "Leaving from",
+                    value=trip.get("departure_city") or "",
+                    key=f"edit_trip_departure_{trip['id']}"
+                )
+
+                d1,d2=st.columns(2)
+                edit_start=d1.date_input(
+                    "Start date",
+                    value=current_start,
+                    format="MM/DD/YYYY",
+                    key=f"edit_trip_start_{trip['id']}"
+                )
+                edit_end=d2.date_input(
+                    "End date",
+                    value=current_end,
+                    format="MM/DD/YYYY",
+                    key=f"edit_trip_end_{trip['id']}"
+                )
+
+                edit_notes=st.text_area(
+                    "Trip notes",
+                    value=trip.get("notes") or "",
+                    placeholder="Budget, vibe, must-do items, reminders, etc.",
+                    key=f"edit_trip_notes_{trip['id']}"
+                )
+
+                save_details=st.form_submit_button(
+                    "Save Trip Information",
+                    use_container_width=True
+                )
+
+                if save_details:
+                    if not edit_name.strip():
+                        st.warning("The trip needs a name.")
+                    elif edit_end < edit_start:
+                        st.warning("The end date has to be on or after the start date.")
+                    else:
                         _shared_patch(
-                            "chaplife_shared_trip_members",
-                            "trip_id=eq."+urllib.parse.quote(str(trip["id"]))+
-                            "&member_id=eq."+urllib.parse.quote(str(m["member_id"])),
+                            "chaplife_shared_trips",
+                            "id=eq."+urllib.parse.quote(str(trip["id"])),
                             {
-                                "can_suggest":mode!="Owner only",
-                                "can_edit":True if mode=="Everyone can edit" else bool(m.get("can_edit"))
+                                "name":edit_name.strip(),
+                                "destination":edit_destination.strip(),
+                                "departure_city":edit_departure.strip(),
+                                "start_date":edit_start.isoformat(),
+                                "end_date":edit_end.isoformat(),
+                                "notes":edit_notes,
+                                "updated_at":datetime.now().isoformat(timespec="seconds")
                             }
                         )
-                st.rerun()
+
+                        # If this user connected the trip to their private Finance,
+                        # refresh their target date/name without exposing private data.
+                        pref=_private_trip_pref(trip["id"])
+                        if pref:
+                            execute(
+                                """UPDATE shared_trip_finance_preferences
+                                   SET trip_name=?,target_date=?,updated_at=?
+                                   WHERE cloud_trip_id=?""",
+                                (
+                                    edit_name.strip(),
+                                    edit_start.isoformat(),
+                                    datetime.now().isoformat(timespec="seconds"),
+                                    str(trip["id"])
+                                )
+                            )
+                            if pref.get("savings_goal_id"):
+                                try:
+                                    execute(
+                                        """UPDATE savings_goals
+                                           SET name=?,target_date=?
+                                           WHERE id=?""",
+                                        (
+                                            f"Trip: {edit_name.strip()}",
+                                            edit_start.isoformat(),
+                                            pref["savings_goal_id"]
+                                        )
+                                    )
+                                except Exception:
+                                    pass
+
+                        st.success("Trip information updated.")
+                        st.rerun()
 
             st.divider()
-            st.markdown("#### 🔑 Transfer ownership")
-            transferable=[
-                m for m in _shared_trip_members(trip["id"])
-                if m.get("role")!="Owner" and m.get("member_id")
-            ]
-            if transferable:
-                transfer_map={
-                    str(m["member_id"]):m.get("member_name") or "ChapLife user"
-                    for m in transferable
-                }
-                new_owner_id=st.selectbox(
-                    "Choose the new trip owner",
-                    options=[""]+list(transfer_map.keys()),
-                    format_func=lambda x:"Select someone…" if x=="" else transfer_map[x],
-                    key=f"transfer_trip_owner_{trip['id']}"
-                )
+
+            # Only the actual owner can manage membership/ownership/deletion.
+            if owner_view:
+                st.markdown("#### Who can see this trip")
                 st.caption(
-                    "The new owner will be able to invite/remove people, change planning control, "
-                    "finalize costs, transfer ownership again, or delete the trip."
+                    "Invite people who already have an approved ChapLife account. "
+                    "Once added, the trip appears in their Trips section."
                 )
-                transfer_confirm=st.checkbox(
-                    "I understand I am giving creator control to this person.",
-                    key=f"confirm_transfer_{trip['id']}"
-                )
-                if st.button(
-                    "Transfer Trip Ownership",
-                    key=f"do_transfer_{trip['id']}",
-                    use_container_width=True,
-                    disabled=(not new_owner_id or not transfer_confirm)
-                ):
-                    target=next(
-                        m for m in transferable
-                        if str(m.get("member_id"))==str(new_owner_id)
-                    )
-                    _transfer_shared_trip_ownership(trip,target)
-                    st.success(f"{target.get('member_name') or 'The selected member'} is now the trip owner.")
-                    st.rerun()
-            else:
-                st.caption("Add another ChapLife user to this trip before transferring ownership.")
 
-            st.divider()
-            st.markdown("#### 🗑️ Delete trip")
-            st.warning(
-                "Deleting a trip permanently removes the shared trip, its invitations, ideas, "
-                "votes, comments, and finalized group costs. Travelers' private Finance data "
-                "outside the shared trip is not exposed."
-            )
-            delete_phrase=st.text_input(
-                f'Type the trip name to confirm: {trip.get("name") or "Trip"}',
-                key=f"delete_trip_phrase_{trip['id']}"
-            )
-            exact_name=str(trip.get("name") or "Trip").strip()
-            can_delete=(delete_phrase.strip()==exact_name)
-            if st.button(
-                "Permanently Delete Trip",
-                key=f"delete_shared_trip_{trip['id']}",
-                type="primary",
-                use_container_width=True,
-                disabled=not can_delete
-            ):
-                _shared_delete(
-                    "chaplife_shared_trips",
-                    "id=eq."+urllib.parse.quote(str(trip["id"]))
+                try:
+                    approved=_admin_http_json(
+                        "/rest/v1/chaplife_members?status=eq.approved&active=eq.true"
+                        "&select=id,display_name,username&order=display_name.asc"
+                    )
+                except Exception:
+                    approved=[]
+
+                current_member_ids={str(m.get("member_id")) for m in members if m.get("member_id")}
+                choices={
+                    str(m["id"]):(m.get("display_name") or m.get("username") or "ChapLife user")
+                    for m in approved
+                    if str(m["id"])!=str(actor.get("member_id") or "")
+                    and str(m["id"]) not in current_member_ids
+                }
+                invite_ids=st.multiselect(
+                    "Add people from ChapLife",
+                    list(choices.keys()),
+                    format_func=lambda x:choices[x],
+                    key=f"central_trip_invites_{trip['id']}"
                 )
-                # Remove only this user's local link to the deleted shared trip.
-                pref=_private_trip_pref(trip["id"])
-                if pref and pref.get("savings_goal_id"):
-                    try:
-                        execute("DELETE FROM savings_goals WHERE id=?",(pref["savings_goal_id"],))
-                    except Exception:
-                        pass
-                execute(
-                    "DELETE FROM shared_trip_finance_preferences WHERE cloud_trip_id=?",
-                    (str(trip["id"]),)
+                if st.button("Add Selected People",key=f"add_shared_people_{trip['id']}",use_container_width=True):
+                    for mid in invite_ids:
+                        _shared_post(
+                            "chaplife_shared_trip_members",
+                            {
+                                "trip_id":trip["id"],
+                                "member_id":mid,
+                                "member_name":choices[mid],
+                                "rsvp":"Invited",
+                                "role":"Member",
+                                "can_suggest":trip.get("planning_mode")!="Owner only",
+                                "can_edit":trip.get("planning_mode")=="Everyone can edit"
+                            },
+                            "trip_id,member_id"
+                        )
+                    st.success("They can now see this trip in ChapLife.")
+                    st.rerun()
+
+                st.markdown("#### People on this trip")
+                members=_shared_trip_members(trip["id"])
+                if not members and actor["is_owner"]:
+                    st.caption(f"👑 {actor['name']} — Creator")
+                for m in members:
+                    cols=st.columns([3,1,1])
+                    crown="👑 " if m.get("role")=="Owner" else ""
+                    cols[0].write(f"{crown}{m.get('member_name') or 'ChapLife user'} · {m.get('rsvp') or 'Invited'}")
+                    if m.get("role")!="Owner":
+                        if cols[1].button("Remove",key=f"remove_shared_member_{trip['id']}_{m['member_id']}"):
+                            _shared_delete(
+                                "chaplife_shared_trip_members",
+                                "trip_id=eq."+urllib.parse.quote(str(trip["id"]))+
+                                "&member_id=eq."+urllib.parse.quote(str(m["member_id"]))
+                            )
+                            st.rerun()
+                        canedit=bool(m.get("can_edit"))
+                        if cols[2].button(
+                            "Editor ✓" if canedit else "Can edit",
+                            key=f"shared_edit_perm_{trip['id']}_{m['member_id']}"
+                        ):
+                            _shared_patch(
+                                "chaplife_shared_trip_members",
+                                "trip_id=eq."+urllib.parse.quote(str(trip["id"]))+
+                                "&member_id=eq."+urllib.parse.quote(str(m["member_id"])),
+                                {"can_edit":not canedit}
+                            )
+                            st.rerun()
+
+                st.divider()
+                mode_opts=["Owner only","Everyone can suggest","Everyone can edit"]
+                stage_opts=["Ideas","Voting","Finalized","Saving","Ready ✈️"]
+                mode=st.selectbox(
+                    "Planning control",
+                    mode_opts,
+                    index=mode_opts.index(trip.get("planning_mode")) if trip.get("planning_mode") in mode_opts else 0,
+                    key=f"shared_trip_mode_{trip['id']}"
                 )
-                st.session_state.pop("shared_trip_select",None)
-                st.success("Trip deleted.")
-                st.rerun()
+                stage=st.selectbox(
+                    "Trip stage",
+                    stage_opts,
+                    index=stage_opts.index(trip.get("status")) if trip.get("status") in stage_opts else 0,
+                    key=f"shared_trip_stage_{trip['id']}"
+                )
+                if st.button("Save Trip Controls",key=f"save_shared_controls_{trip['id']}",use_container_width=True):
+                    _shared_patch(
+                        "chaplife_shared_trips",
+                        "id=eq."+urllib.parse.quote(str(trip["id"])),
+                        {
+                            "planning_mode":mode,
+                            "status":stage,
+                            "updated_at":datetime.now().isoformat(timespec="seconds")
+                        }
+                    )
+                    # Keep default permissions aligned with the selected mode.
+                    for m in _shared_trip_members(trip["id"]):
+                        if m.get("role")!="Owner":
+                            _shared_patch(
+                                "chaplife_shared_trip_members",
+                                "trip_id=eq."+urllib.parse.quote(str(trip["id"]))+
+                                "&member_id=eq."+urllib.parse.quote(str(m["member_id"])),
+                                {
+                                    "can_suggest":mode!="Owner only",
+                                    "can_edit":True if mode=="Everyone can edit" else bool(m.get("can_edit"))
+                                }
+                            )
+                    st.rerun()
+
+                st.divider()
+                st.markdown("#### 🔑 Transfer ownership")
+                transferable=[
+                    m for m in _shared_trip_members(trip["id"])
+                    if m.get("role")!="Owner" and m.get("member_id")
+                ]
+                if transferable:
+                    transfer_map={
+                        str(m["member_id"]):m.get("member_name") or "ChapLife user"
+                        for m in transferable
+                    }
+                    new_owner_id=st.selectbox(
+                        "Choose the new trip owner",
+                        options=[""]+list(transfer_map.keys()),
+                        format_func=lambda x:"Select someone…" if x=="" else transfer_map[x],
+                        key=f"transfer_trip_owner_{trip['id']}"
+                    )
+                    st.caption(
+                        "The new owner will be able to invite/remove people, change planning control, "
+                        "finalize costs, transfer ownership again, or delete the trip."
+                    )
+                    transfer_confirm=st.checkbox(
+                        "I understand I am giving creator control to this person.",
+                        key=f"confirm_transfer_{trip['id']}"
+                    )
+                    if st.button(
+                        "Transfer Trip Ownership",
+                        key=f"do_transfer_{trip['id']}",
+                        use_container_width=True,
+                        disabled=(not new_owner_id or not transfer_confirm)
+                    ):
+                        target=next(
+                            m for m in transferable
+                            if str(m.get("member_id"))==str(new_owner_id)
+                        )
+                        _transfer_shared_trip_ownership(trip,target)
+                        st.success(f"{target.get('member_name') or 'The selected member'} is now the trip owner.")
+                        st.rerun()
+                else:
+                    st.caption("Add another ChapLife user to this trip before transferring ownership.")
+
+                st.divider()
+                st.markdown("#### 🗑️ Delete trip")
+                st.warning(
+                    "Deleting a trip permanently removes the shared trip, its invitations, ideas, "
+                    "votes, comments, and finalized group costs. Travelers' private Finance data "
+                    "outside the shared trip is not exposed."
+                )
+                delete_phrase=st.text_input(
+                    f'Type the trip name to confirm: {trip.get("name") or "Trip"}',
+                    key=f"delete_trip_phrase_{trip['id']}"
+                )
+                exact_name=str(trip.get("name") or "Trip").strip()
+                can_delete=(delete_phrase.strip()==exact_name)
+                if st.button(
+                    "Permanently Delete Trip",
+                    key=f"delete_shared_trip_{trip['id']}",
+                    type="primary",
+                    use_container_width=True,
+                    disabled=not can_delete
+                ):
+                    _shared_delete(
+                        "chaplife_shared_trips",
+                        "id=eq."+urllib.parse.quote(str(trip["id"]))
+                    )
+                    # Remove only this user's local link to the deleted shared trip.
+                    pref=_private_trip_pref(trip["id"])
+                    if pref and pref.get("savings_goal_id"):
+                        try:
+                            execute("DELETE FROM savings_goals WHERE id=?",(pref["savings_goal_id"],))
+                        except Exception:
+                            pass
+                    execute(
+                        "DELETE FROM shared_trip_finance_preferences WHERE cloud_trip_id=?",
+                        (str(trip["id"]),)
+                    )
+                    st.session_state.pop("shared_trip_select",None)
+                    st.success("Trip deleted.")
+                    st.rerun()
 
     # ----------------------- RSVP -----------------------
     mine=_shared_trip_member_record(trip["id"],actor.get("member_id"))
@@ -1180,7 +1401,7 @@ def trips_page():
     tabs=st.tabs(["💡 Ideas","🗳️ Decisions","💰 Final Trip Cost","💵 My Budget & Savings"])
 
     # ----------------------- IDEAS -----------------------
-    with tabs[0]:
+    with tabs[1]:
         if _shared_trip_can_suggest(trip,actor):
             with st.form(f"shared_option_form_{trip['id']}",clear_on_submit=True):
                 cat=st.selectbox(
@@ -1322,7 +1543,7 @@ def trips_page():
                         st.rerun()
 
     # ----------------------- DECISIONS -----------------------
-    with tabs[1]:
+    with tabs[2]:
         options=_shared_trip_options(trip["id"])
         if not options:
             st.caption("No options to compare yet.")
@@ -1345,7 +1566,7 @@ def trips_page():
             st.dataframe(pd.DataFrame(data),hide_index=True,use_container_width=True)
 
     # ----------------------- FINAL GROUP COST -----------------------
-    with tabs[2]:
+    with tabs[3]:
         items=_shared_trip_budget_items(trip["id"])
         if not items:
             st.caption("Finalized trip choices will appear here.")
@@ -1381,7 +1602,7 @@ def trips_page():
             st.caption(f"Current equal-share estimate: ${final_total/max(1,people):,.2f} each across {people} traveler(s).")
 
     # ----------------------- PRIVATE MONEY CHOICE -----------------------
-    with tabs[3]:
+    with tabs[4]:
         st.markdown("### Your private trip money plan")
         st.caption(
             "Only you can see what you connect to your Finance section. "
@@ -2917,18 +3138,30 @@ if 'page' not in st.session_state: st.session_state.page='Home'
 def goto(p): st.session_state.page=p
 
 pages = {
- 'Home':'🏠', 'Finances':'💰', 'Trips':'✈️', 'Food & Nutrition':'🥗', 'Grocery Shopping':'🛒', 'My Trainer':'🏋🏾‍♀️',
- 'Water & Jug Puzzles':'💧', 'Vocabulary':'📖', 'Health & Life':'❤️', 'Career Simulator':'🏗️',
+ 'Home':'🏠', 'Finances':'💰', 'Trips':'✈️', 'Food & Nutrition':'🥗',
+ 'Grocery Shopping':'🛒', 'My Trainer':'🏋🏾‍♀️', 'Health & Life':'❤️',
  'My Progress':'📈', 'Settings':'⚙️', 'Profile':'👤'
 }
+
+# Optional sections for regular members live in Settings → Extra Features.
+if _extra_feature_enabled('water_jugs'):
+    pages['Water & Jug Puzzles']='💧'
+if _extra_feature_enabled('vocabulary'):
+    pages['Vocabulary']='📖'
+if _extra_feature_enabled('growth'):
+    pages['Growth Lab']='🌱'
+if _extra_feature_enabled('conversation'):
+    pages['Conversation & Current Events']='💬'
+
+# Owner-only tools never appear for regular member accounts.
 if _is_owner():
+    pages['Career Simulator']='🏗️'
     pages['User Management']='🛡️'
 
-# Private sections are hidden from navigation unless explicitly enabled in Settings.
-if bool(get_setting('show_growth_section',False)):
-    pages['Growth Lab']='🌱'
-if bool(get_setting('show_conversation_section',False)):
-    pages['Conversation & Current Events']='💬'
+# If an optional section was just turned off, do not leave a hidden page open.
+if page not in pages:
+    page="Home"
+    st.session_state.page="Home"
 
 nav_items=list(pages.items())
 for start in range(0,len(nav_items),5):
@@ -3074,14 +3307,19 @@ def home():
     st.subheader('My dashboard')
     insights=_dashboard_insights()
     grid=[
-        ('💰','Finances'),('✈️','Trips'),('🥗','Food & Nutrition'),('🛒','Grocery Shopping'),
-        ('🏋🏾‍♀️','My Trainer'),('💧','Water & Jug Puzzles'),('📖','Vocabulary'),
-        ('🏗️','Career Simulator'),('❤️','Health & Life')
+        ('💰','Finances'),('✈️','Trips'),('🥗','Food & Nutrition'),
+        ('🛒','Grocery Shopping'),('🏋🏾‍♀️','My Trainer'),('❤️','Health & Life')
     ]
-    if bool(get_setting('show_growth_section',False)):
+    if _extra_feature_enabled('water_jugs'):
+        grid.append(('💧','Water & Jug Puzzles'))
+    if _extra_feature_enabled('vocabulary'):
+        grid.append(('📖','Vocabulary'))
+    if _extra_feature_enabled('growth'):
         grid.append(('🌱','Growth Lab'))
-    if bool(get_setting('show_conversation_section',False)):
+    if _extra_feature_enabled('conversation'):
         grid.append(('💬','Conversation & Current Events'))
+    if _is_owner():
+        grid.append(('🏗️','Career Simulator'))
 
     st.markdown("""
     <style>
@@ -4455,7 +4693,7 @@ def _finances_legacy():
             if st.button('Reset roommate payments',disabled=not ok):
                 reset_table('roommate_allocations'); reset_table('roommate_payments'); st.rerun()
 
-    with tabs[4]:
+    with tabs[5]:
         st.subheader('📆 Bill Funding Across Paychecks')
         st.caption('Spread your share across one paycheck, halves, thirds, fourths, or your own custom amounts.')
         with st.form('bill_plan_form',clear_on_submit=True):
@@ -4496,7 +4734,7 @@ def _finances_legacy():
             ok=st.checkbox('I understand this clears all bill funding plans',key='reset_billplans')
             if st.button('Reset all bill funding plans',disabled=not ok): reset_table('bill_funding'); reset_table('bill_plans'); st.rerun()
 
-    with tabs[5]:
+    with tabs[6]:
         st.subheader('Savings Planner'); st.caption('Create a goal and ChapLife calculates what you need to save by your deadline.')
         with st.form('goalform',clear_on_submit=True):
             c=st.columns(4); name=c[0].text_input('Goal name',placeholder='MLK Weekend 2027'); gtype=c[1].selectbox('Goal type',['Trip / Vacation','Emergency Fund','Car','Home','Event','Holiday','Major Purchase','Personal','Other']); target=c[2].number_input('Goal amount',min_value=1.0,step=50.0,value=3800.0); current=c[3].number_input('Already saved',min_value=0.0,step=25.0)
@@ -4731,8 +4969,13 @@ def save_plan_grocery(plan):
 
 def food():
     st.title('🥗 Food & Nutrition')
-    tabs=st.tabs(['Lifestyle Profile','Plan My Week','Herbalife Bar','My Go-To Meals','Today / Meal Counter','Eating Out'])
-    with tabs[0]:
+    food_tab_names=['Lifestyle Profile','Plan My Week']
+    if _food_extra_enabled('herbalife'):
+        food_tab_names.append('Herbalife Bar')
+    food_tab_names += ['My Go-To Meals','Today / Meal Counter','Eating Out']
+    tabs=st.tabs(food_tab_names)
+    tab_index={name:i for i,name in enumerate(food_tab_names)}
+    with tabs[tab_index['Lifestyle Profile']]:
         prof=get_setting('food_profile',{}) or {}
         with st.form('foodprof'):
             c=st.columns(3); goal=c[0].selectbox('Main goal',['Lose weight','Maintain weight','Build strength / muscle','Eat more consistently','General health','Other'],index=['Lose weight','Maintain weight','Build strength / muscle','Eat more consistently','General health','Other'].index(prof.get('goal','General health')) if prof.get('goal') in ['Lose weight','Maintain weight','Build strength / muscle','Eat more consistently','General health','Other'] else 4); cook=c[1].selectbox('Cooking style',['Very simple','Simple','Moderate','I like cooking']); cooktime=c[2].selectbox('Typical cook time',['10–15 minutes','20–30 minutes','30–45 minutes','Flexible'])
@@ -4742,17 +4985,38 @@ def food():
             if st.form_submit_button('Save lifestyle profile',use_container_width=True): set_setting('food_profile',{'goal':goal,'cook':cook,'time':cooktime,'meals':mealsper,'eatout':eatout,'budget':budget,'calorie_target':calorie_target,'dislikes':dislikes,'lifestyle':lifestyle}); st.rerun()
         st.divider()
         st.subheader('Meals I like included')
-        st.caption('These preferences tell the weekly planner to intentionally work your regular foods into the plan instead of only choosing random meals.')
+        st.caption('Choose your own saved go-to meals for the weekly planner. Optional Herbalife and Overnight Oats shortcuts appear only when enabled.')
         prefs=get_setting('meal_include_preferences',{}) or {}
-        include_oats=st.toggle('Include overnight oats',value=bool(prefs.get('overnight_oats',True)),key='pref_oats')
-        include_shake=st.toggle('Include my Herbalife protein shake',value=bool(prefs.get('herbalife_shake',False)),key='pref_herbalife')
-        c=st.columns(2)
-        oats_times=c[0].selectbox('Overnight oats frequency',['1x/week','2x/week','3x/week','4x/week'],index=['1x/week','2x/week','3x/week','4x/week'].index(prefs.get('oats_frequency','2x/week')) if prefs.get('oats_frequency','2x/week') in ['1x/week','2x/week','3x/week','4x/week'] else 1,disabled=not include_oats)
-        shake_times=c[1].selectbox('Herbalife shake frequency',['1x/week','2x/week','3x/week','4x/week','5x/week','Daily'],index=['1x/week','2x/week','3x/week','4x/week','5x/week','Daily'].index(prefs.get('shake_frequency','3x/week')) if prefs.get('shake_frequency','3x/week') in ['1x/week','2x/week','3x/week','4x/week','5x/week','Daily'] else 2,disabled=not include_shake)
+        include_oats=False; oats_times='2x/week'
+        include_shake=False; shake_times='3x/week'
+
+        if _food_extra_enabled('overnight_oats'):
+            include_oats=st.toggle('Include overnight oats',value=bool(prefs.get('overnight_oats',True)),key='pref_oats')
+            oats_times=st.selectbox('Overnight oats frequency',['1x/week','2x/week','3x/week','4x/week'],
+                                    index=['1x/week','2x/week','3x/week','4x/week'].index(prefs.get('oats_frequency','2x/week')) if prefs.get('oats_frequency','2x/week') in ['1x/week','2x/week','3x/week','4x/week'] else 1,
+                                    disabled=not include_oats)
+        if _food_extra_enabled('herbalife'):
+            include_shake=st.toggle('Include my Herbalife protein shake',value=bool(prefs.get('herbalife_shake',False)),key='pref_herbalife')
+            shake_times=st.selectbox('Herbalife shake frequency',['1x/week','2x/week','3x/week','4x/week','5x/week','Daily'],
+                                     index=['1x/week','2x/week','3x/week','4x/week','5x/week','Daily'].index(prefs.get('shake_frequency','3x/week')) if prefs.get('shake_frequency','3x/week') in ['1x/week','2x/week','3x/week','4x/week','5x/week','Daily'] else 2,
+                                     disabled=not include_shake)
+
+        all_saved=favorite_meals_from_settings()
+        reserved={'My Herbalife protein shake','Overnight oats'}
+        custom_names=[m.get('name') for m in all_saved if m.get('name') and m.get('name') not in reserved]
+        selected_custom=st.multiselect('My custom go-to meals',custom_names,
+                                       default=[x for x in prefs.get('custom_go_tos',[]) if x in custom_names],
+                                       help='Create these in My Go-To Meals.')
+        custom_freq=st.selectbox('Use each selected custom go-to',['1x/week','2x/week','3x/week'],
+                                 index=['1x/week','2x/week','3x/week'].index(prefs.get('custom_frequency','1x/week')) if prefs.get('custom_frequency','1x/week') in ['1x/week','2x/week','3x/week'] else 0)
         if st.button('Save meal preferences',use_container_width=True):
-            set_setting('meal_include_preferences',{'overnight_oats':include_oats,'herbalife_shake':include_shake,'oats_frequency':oats_times,'shake_frequency':shake_times})
+            set_setting('meal_include_preferences',{
+                'overnight_oats':include_oats,'herbalife_shake':include_shake,
+                'oats_frequency':oats_times,'shake_frequency':shake_times,
+                'custom_go_tos':selected_custom,'custom_frequency':custom_freq
+            })
             st.success('Meal-plan preferences saved.')
-    with tabs[1]:
+    with tabs[tab_index['Plan My Week']]:
         prof=get_setting('food_profile',{}) or {}; goal=prof.get('goal','General health')
         st.caption(f'Planning style: simple meals • goal: {goal}. Every meal includes a recipe and exact ingredient amounts.')
         days=st.multiselect('Days to plan',['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'],default=['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'])
@@ -4771,9 +5035,9 @@ def food():
             # Work requested go-to meals into breakfast slots across selected days.
             selected_days=list(days)
             breakfast_targets=[]
-            if prefs.get('overnight_oats') and selected_days:
+            if prefs.get('overnight_oats') and _food_extra_enabled('overnight_oats') and selected_days:
                 breakfast_targets += [('Overnight oats',freq_count(prefs.get('oats_frequency','2x/week'),len(selected_days)))]
-            if prefs.get('herbalife_shake') and selected_days:
+            if prefs.get('herbalife_shake') and _food_extra_enabled('herbalife') and selected_days:
                 shake=meal_by_name('My Herbalife protein shake')
                 if shake:
                     breakfast_targets += [('My Herbalife protein shake',freq_count(prefs.get('shake_frequency','3x/week'),len(selected_days)))]
@@ -4787,6 +5051,20 @@ def food():
                     d=selected_days[cursor % len(selected_days)]
                     plan[d][0]=fav
                     cursor+=1
+
+            # Members can create and include their own go-to meals.
+            meal_slot={'Breakfast':0,'Lunch':1,'Dinner':2,'Snack':3}
+            custom_count=freq_count(prefs.get('custom_frequency','1x/week'),len(selected_days))
+            custom_cursor=0
+            for meal_name in prefs.get('custom_go_tos',[]) or []:
+                fav=meal_by_name(meal_name)
+                if not fav: continue
+                slot=meal_slot.get(fav.get('type','Breakfast'),0)
+                for _ in range(custom_count):
+                    if not selected_days: break
+                    d=selected_days[custom_cursor % len(selected_days)]
+                    plan[d][slot]=fav
+                    custom_cursor+=1
 
             st.session_state.meal_plan=plan; set_setting('meal_plan',plan); save_plan_grocery(plan); st.rerun()
         if c[1].button('Clear meal plan',use_container_width=True): st.session_state.pop('meal_plan',None); set_setting('meal_plan',{}); st.rerun()
@@ -4808,147 +5086,150 @@ def food():
             for (item,cat,unit,buy),qty in aggregate_ingredients(plan).items(): st.write(f'• **{item} — {fmt_qty(qty)} {unit} needed** · {buy}')
             if st.button('Refresh Grocery Shopping list from this plan',use_container_width=True): save_plan_grocery(plan); st.success('Grocery list updated.')
         else: st.info('Build a plan to create recipes and the grocery list automatically.')
-    with tabs[2]:
-        st.subheader('🥤 Herbalife Bar')
-        st.write('Choose the Herbalife products you actually use, favorite your regulars, and combine multiple products into one shake, tea, aloe water, lemonade, or custom drink.')
-        st.caption('Product names/categories are based on the Herbalife U.S. catalog. ChapLife does not invent missing nutrition values; where a product/serving varies, the finished drink shows what still needs label verification.')
+    if _food_extra_enabled('herbalife'):
+        with tabs[tab_index['Herbalife Bar']]:
+            st.subheader('🥤 Herbalife Bar')
+            st.write('Choose the Herbalife products you actually use, favorite your regulars, and combine multiple products into one shake, tea, aloe water, lemonade, or custom drink.')
+            st.caption('Product names/categories are based on the Herbalife U.S. catalog. ChapLife does not invent missing nutrition values; where a product/serving varies, the finished drink shows what still needs label verification.')
 
-        favorites=herbalife_favorites()
-        category=st.selectbox('Browse category',['All']+sorted(set(p['category'] for p in HERBALIFE_CATALOG)),key='hl_category')
-        products=[p for p in HERBALIFE_CATALOG if category=='All' or p['category']==category]
-        search=st.text_input('Search Herbalife products',placeholder='Formula 1, aloe, tea, protein, collagen...',key='hl_search')
-        if search.strip():
-            products=[p for p in products if search.lower() in (p['name']+' '+p['category']).lower()]
+            favorites=herbalife_favorites()
+            category=st.selectbox('Browse category',['All']+sorted(set(p['category'] for p in HERBALIFE_CATALOG)),key='hl_category')
+            products=[p for p in HERBALIFE_CATALOG if category=='All' or p['category']==category]
+            search=st.text_input('Search Herbalife products',placeholder='Formula 1, aloe, tea, protein, collagen...',key='hl_search')
+            if search.strip():
+                products=[p for p in products if search.lower() in (p['name']+' '+p['category']).lower()]
 
-        st.markdown('#### Product Library')
-        for p in products:
-            with st.container(border=True):
-                c=st.columns([5,2,2])
-                c[0].markdown(f"**{p['name']}**  \n{p['category']}")
-                c[1].write('⭐ Favorite' if p['name'] in favorites else 'Not favorited')
-                if c[2].button('Remove ⭐' if p['name'] in favorites else 'Add ⭐',key='hlfav_'+re.sub(r'[^a-z0-9]','_',p['name'].lower())):
-                    fav=set(favorites)
-                    if p['name'] in fav: fav.remove(p['name'])
-                    else: fav.add(p['name'])
-                    set_setting('herbalife_favorites',sorted(fav)); st.rerun()
-
-        st.divider()
-        st.markdown('### 🧪 Build My Drink')
-        drink_type=st.segmented_control('What are you making?',['Shake','Tea','Aloe Water','Lemonade / Beauty Drink','Custom'],default='Shake',key='hl_drink_type')
-        fav_first=sorted(HERBALIFE_CATALOG,key=lambda p:(p['name'] not in favorites,p['category'],p['name']))
-        selected=st.multiselect('Add Herbalife products',[p['name'] for p in fav_first],key='hl_drink_products',
-                                help='Your ⭐ favorites appear first.')
-        components=[]
-        known_cal=0; known_pro=0; known_caf=0; unknown_nutrition=[]
-        for name in selected:
-            p=herbalife_product(name)
-            with st.container(border=True):
-                st.markdown(f"**{name}**")
-                c=st.columns(3)
-                amount=c[0].number_input('Amount',min_value=0.0,value=1.0,step=0.5,key='hl_amt_'+re.sub(r'[^a-z0-9]','_',name.lower()))
-                unit=c[1].text_input('Unit',value=p['unit'],key='hl_unit_'+re.sub(r'[^a-z0-9]','_',name.lower()))
-                flavor=c[2].text_input('Flavor / version',key='hl_flavor_'+re.sub(r'[^a-z0-9]','_',name.lower()))
-                components.append({'name':name,'amount':amount,'unit':unit,'flavor':flavor,'category':p['category']})
-                if p['cal'] is None or p['protein'] is None:
-                    unknown_nutrition.append(name)
-                else:
-                    known_cal += p['cal']*amount
-                    known_pro += p['protein']*amount
-                if p['caffeine'] is None:
-                    if 'Energy' in p['category'] or 'Tea' in p['category']: unknown_nutrition.append(name+' caffeine')
-                else:
-                    known_caf += p['caffeine']*amount
-
-        st.markdown('#### Regular ingredients')
-        regular=st.text_area('Add milk/water/fruit/ice/etc. — one per line',
-                             placeholder='Unsweetened almond milk | 8 oz\nBanana | 1/2\nIce | 1 cup',
-                             key='hl_regular_ingredients')
-        c=st.columns(3)
-        c[0].metric('Known calories',f'{known_cal:.0f}')
-        c[1].metric('Known protein',f'{known_pro:.0f} g')
-        c[2].metric('Known caffeine',f'{known_caf:.0f} mg')
-        if unknown_nutrition:
-            st.warning('Nutrition still needs label verification for: '+', '.join(dict.fromkeys(unknown_nutrition))+'. ChapLife will not guess these values.')
-
-        drink_name=st.text_input('Save this combination as',placeholder='My Morning Shake, My Tea, My Skin Lemonade...',key='hl_drink_name')
-        c=st.columns(2)
-        if c[0].button('💾 Save Combination',use_container_width=True,key='save_hl_combo'):
-            if drink_name.strip() and components:
-                drinks=[d for d in saved_herbalife_drinks() if d.get('name')!=drink_name.strip()]
-                drinks.append({'name':drink_name.strip(),'type':drink_type,'products':components,'regular':regular,
-                               'known_cal':known_cal,'known_protein':known_pro,'known_caffeine':known_caf,
-                               'needs_verification':list(dict.fromkeys(unknown_nutrition))})
-                set_setting('herbalife_saved_drinks',drinks)
-                st.success('Combination saved.')
-            else:
-                st.warning('Choose at least one Herbalife product and give the drink a name.')
-
-        if c[1].button('✓ I had this drink',use_container_width=True,key='log_hl_combo'):
-            if components:
-                execute('INSERT INTO meals(meal_date,meal_name,calories,protein,source) VALUES(?,?,?,?,?)',
-                        (date.today().isoformat(),drink_name.strip() or f'Herbalife {drink_type}',int(known_cal),int(known_pro),'Herbalife Bar'))
-                st.success('Added to today’s meal counter. Known nutrition was logged; any unverified product values are not guessed.')
-            else:
-                st.warning('Add products to the drink first.')
-
-        drinks=saved_herbalife_drinks()
-        if drinks:
-            st.markdown('### ❤️ My Usual Herbalife Drinks')
-            for d in drinks:
+            st.markdown('#### Product Library')
+            for p in products:
                 with st.container(border=True):
-                    st.markdown(f"**{d['name']}** · {d.get('type','Drink')}")
-                    st.write(' + '.join((x.get('flavor')+' ' if x.get('flavor') else '')+x['name'] for x in d.get('products',[])))
-                    if d.get('regular'): st.caption('Also: '+d['regular'].replace('\n',' · '))
-                    c=st.columns(3)
-                    c[0].metric('Known cal',f"{d.get('known_cal',0):.0f}")
-                    c[1].metric('Known protein',f"{d.get('known_protein',0):.0f} g")
-                    c[2].metric('Known caffeine',f"{d.get('known_caffeine',0):.0f} mg")
-                    if d.get('needs_verification'): st.caption('Label check needed: '+', '.join(d['needs_verification']))
+                    c=st.columns([5,2,2])
+                    c[0].markdown(f"**{p['name']}**  \n{p['category']}")
+                    c[1].write('⭐ Favorite' if p['name'] in favorites else 'Not favorited')
+                    if c[2].button('Remove ⭐' if p['name'] in favorites else 'Add ⭐',key='hlfav_'+re.sub(r'[^a-z0-9]','_',p['name'].lower())):
+                        fav=set(favorites)
+                        if p['name'] in fav: fav.remove(p['name'])
+                        else: fav.add(p['name'])
+                        set_setting('herbalife_favorites',sorted(fav)); st.rerun()
 
-    with tabs[3]:
+            st.divider()
+            st.markdown('### 🧪 Build My Drink')
+            drink_type=st.segmented_control('What are you making?',['Shake','Tea','Aloe Water','Lemonade / Beauty Drink','Custom'],default='Shake',key='hl_drink_type')
+            fav_first=sorted(HERBALIFE_CATALOG,key=lambda p:(p['name'] not in favorites,p['category'],p['name']))
+            selected=st.multiselect('Add Herbalife products',[p['name'] for p in fav_first],key='hl_drink_products',
+                                    help='Your ⭐ favorites appear first.')
+            components=[]
+            known_cal=0; known_pro=0; known_caf=0; unknown_nutrition=[]
+            for name in selected:
+                p=herbalife_product(name)
+                with st.container(border=True):
+                    st.markdown(f"**{name}**")
+                    c=st.columns(3)
+                    amount=c[0].number_input('Amount',min_value=0.0,value=1.0,step=0.5,key='hl_amt_'+re.sub(r'[^a-z0-9]','_',name.lower()))
+                    unit=c[1].text_input('Unit',value=p['unit'],key='hl_unit_'+re.sub(r'[^a-z0-9]','_',name.lower()))
+                    flavor=c[2].text_input('Flavor / version',key='hl_flavor_'+re.sub(r'[^a-z0-9]','_',name.lower()))
+                    components.append({'name':name,'amount':amount,'unit':unit,'flavor':flavor,'category':p['category']})
+                    if p['cal'] is None or p['protein'] is None:
+                        unknown_nutrition.append(name)
+                    else:
+                        known_cal += p['cal']*amount
+                        known_pro += p['protein']*amount
+                    if p['caffeine'] is None:
+                        if 'Energy' in p['category'] or 'Tea' in p['category']: unknown_nutrition.append(name+' caffeine')
+                    else:
+                        known_caf += p['caffeine']*amount
+
+            st.markdown('#### Regular ingredients')
+            regular=st.text_area('Add milk/water/fruit/ice/etc. — one per line',
+                                 placeholder='Unsweetened almond milk | 8 oz\nBanana | 1/2\nIce | 1 cup',
+                                 key='hl_regular_ingredients')
+            c=st.columns(3)
+            c[0].metric('Known calories',f'{known_cal:.0f}')
+            c[1].metric('Known protein',f'{known_pro:.0f} g')
+            c[2].metric('Known caffeine',f'{known_caf:.0f} mg')
+            if unknown_nutrition:
+                st.warning('Nutrition still needs label verification for: '+', '.join(dict.fromkeys(unknown_nutrition))+'. ChapLife will not guess these values.')
+
+            drink_name=st.text_input('Save this combination as',placeholder='My Morning Shake, My Tea, My Skin Lemonade...',key='hl_drink_name')
+            c=st.columns(2)
+            if c[0].button('💾 Save Combination',use_container_width=True,key='save_hl_combo'):
+                if drink_name.strip() and components:
+                    drinks=[d for d in saved_herbalife_drinks() if d.get('name')!=drink_name.strip()]
+                    drinks.append({'name':drink_name.strip(),'type':drink_type,'products':components,'regular':regular,
+                                   'known_cal':known_cal,'known_protein':known_pro,'known_caffeine':known_caf,
+                                   'needs_verification':list(dict.fromkeys(unknown_nutrition))})
+                    set_setting('herbalife_saved_drinks',drinks)
+                    st.success('Combination saved.')
+                else:
+                    st.warning('Choose at least one Herbalife product and give the drink a name.')
+
+            if c[1].button('✓ I had this drink',use_container_width=True,key='log_hl_combo'):
+                if components:
+                    execute('INSERT INTO meals(meal_date,meal_name,calories,protein,source) VALUES(?,?,?,?,?)',
+                            (date.today().isoformat(),drink_name.strip() or f'Herbalife {drink_type}',int(known_cal),int(known_pro),'Herbalife Bar'))
+                    st.success('Added to today’s meal counter. Known nutrition was logged; any unverified product values are not guessed.')
+                else:
+                    st.warning('Add products to the drink first.')
+
+            drinks=saved_herbalife_drinks()
+            if drinks:
+                st.markdown('### ❤️ My Usual Herbalife Drinks')
+                for d in drinks:
+                    with st.container(border=True):
+                        st.markdown(f"**{d['name']}** · {d.get('type','Drink')}")
+                        st.write(' + '.join((x.get('flavor')+' ' if x.get('flavor') else '')+x['name'] for x in d.get('products',[])))
+                        if d.get('regular'): st.caption('Also: '+d['regular'].replace('\n',' · '))
+                        c=st.columns(3)
+                        c[0].metric('Known cal',f"{d.get('known_cal',0):.0f}")
+                        c[1].metric('Known protein',f"{d.get('known_protein',0):.0f} g")
+                        c[2].metric('Known caffeine',f"{d.get('known_caffeine',0):.0f} mg")
+                        if d.get('needs_verification'): st.caption('Label check needed: '+', '.join(d['needs_verification']))
+
+    with tabs[tab_index['My Go-To Meals']]:
         st.subheader('⭐ My Go-To Meals')
         st.write('Save meals you use regularly so the planner can intentionally include them and the grocery list can buy the right amounts.')
 
-        with st.container(border=True):
-            st.markdown('### 🥤 My Herbalife protein shake')
-            st.caption('Enter what you actually use. Herbalife nutrition can vary by product, flavor, serving size, liquid and add-ins, so ChapLife will use your label/recipe values instead of guessing.')
-            existing=meal_by_name('My Herbalife protein shake')
-            with st.form('herbalife_recipe'):
-                c=st.columns(2)
-                product=c[0].text_input('Herbalife product / flavor',value=(existing or {}).get('product',''),placeholder='Example: Formula 1, flavor...')
-                serving=c[1].text_input('Amount of Herbalife product',value=(existing or {}).get('serving',''),placeholder='Example: 2 scoops / label serving')
-                c=st.columns(3)
-                liquid=c[0].text_input('Liquid + amount',value=(existing or {}).get('liquid',''),placeholder='Example: 8 oz unsweetened almond milk')
-                calories=c[1].number_input('Calories for YOUR finished shake',min_value=0,step=10,value=int((existing or {}).get('cal',0) or 0))
-                protein=c[2].number_input('Protein for YOUR finished shake (g)',min_value=0,step=1,value=int((existing or {}).get('protein',0) or 0))
-                extras=st.text_area('Regular add-ins + amounts',value=(existing or {}).get('extras',''),placeholder='Example: 1/2 banana, 1 tbsp peanut butter, ice')
-                grocery=st.text_area('Ingredients for grocery list — one per line',value=(existing or {}).get('grocery_text',''),placeholder='Unsweetened almond milk | Dairy / Eggs | 8 | oz | Half gallon\nBanana | Produce | 0.5 | each | Buy per serving')
-                if st.form_submit_button('Save Herbalife shake',use_container_width=True):
-                    ingredients=[]
-                    # Herbalife product itself is included if user provides an amount, but free-text units stay practical.
-                    if product.strip() and serving.strip():
-                        ingredients.append((f'Herbalife {product.strip()}','Pantry',1,'serving',f'Use {serving.strip()} per shake'))
-                    for line in grocery.splitlines():
-                        parts=[p.strip() for p in line.split('|')]
-                        if len(parts)>=5:
-                            try: ingredients.append((parts[0],parts[1],float(parts[2]),parts[3],parts[4]))
-                            except: pass
-                    shake={'name':'My Herbalife protein shake','type':'Breakfast','cal':calories,'protein':protein,
-                           'goal':['Lose weight','Maintain weight','Build strength / muscle','Eat more consistently','General health','Other'],
-                           'ingredients':ingredients,
-                           'steps':[f'Add {serving or "your measured serving"} of {product or "Herbalife product"} to {liquid or "your chosen liquid"}.',
-                                    'Add your regular extras if using them.','Blend until smooth and serve.'],
-                           'product':product,'serving':serving,'liquid':liquid,'extras':extras,'grocery_text':grocery}
-                    saved=[m for m in favorite_meals_from_settings() if m.get('name')!='My Herbalife protein shake']
-                    saved.append(shake); set_setting('favorite_meals',saved)
-                    st.success('Herbalife shake saved. You can now tell the weekly planner to include it.')
+        if _food_extra_enabled('herbalife'):
+            with st.container(border=True):
+                st.markdown('### 🥤 My Herbalife protein shake')
+                st.caption('Enter what you actually use. Herbalife nutrition can vary by product, flavor, serving size, liquid and add-ins, so ChapLife will use your label/recipe values instead of guessing.')
+                existing=meal_by_name('My Herbalife protein shake')
+                with st.form('herbalife_recipe'):
+                    c=st.columns(2)
+                    product=c[0].text_input('Herbalife product / flavor',value=(existing or {}).get('product',''),placeholder='Example: Formula 1, flavor...')
+                    serving=c[1].text_input('Amount of Herbalife product',value=(existing or {}).get('serving',''),placeholder='Example: 2 scoops / label serving')
+                    c=st.columns(3)
+                    liquid=c[0].text_input('Liquid + amount',value=(existing or {}).get('liquid',''),placeholder='Example: 8 oz unsweetened almond milk')
+                    calories=c[1].number_input('Calories for YOUR finished shake',min_value=0,step=10,value=int((existing or {}).get('cal',0) or 0))
+                    protein=c[2].number_input('Protein for YOUR finished shake (g)',min_value=0,step=1,value=int((existing or {}).get('protein',0) or 0))
+                    extras=st.text_area('Regular add-ins + amounts',value=(existing or {}).get('extras',''),placeholder='Example: 1/2 banana, 1 tbsp peanut butter, ice')
+                    grocery=st.text_area('Ingredients for grocery list — one per line',value=(existing or {}).get('grocery_text',''),placeholder='Unsweetened almond milk | Dairy / Eggs | 8 | oz | Half gallon\nBanana | Produce | 0.5 | each | Buy per serving')
+                    if st.form_submit_button('Save Herbalife shake',use_container_width=True):
+                        ingredients=[]
+                        # Herbalife product itself is included if user provides an amount, but free-text units stay practical.
+                        if product.strip() and serving.strip():
+                            ingredients.append((f'Herbalife {product.strip()}','Pantry',1,'serving',f'Use {serving.strip()} per shake'))
+                        for line in grocery.splitlines():
+                            parts=[p.strip() for p in line.split('|')]
+                            if len(parts)>=5:
+                                try: ingredients.append((parts[0],parts[1],float(parts[2]),parts[3],parts[4]))
+                                except: pass
+                        shake={'name':'My Herbalife protein shake','type':'Breakfast','cal':calories,'protein':protein,
+                               'goal':['Lose weight','Maintain weight','Build strength / muscle','Eat more consistently','General health','Other'],
+                               'ingredients':ingredients,
+                               'steps':[f'Add {serving or "your measured serving"} of {product or "Herbalife product"} to {liquid or "your chosen liquid"}.',
+                                        'Add your regular extras if using them.','Blend until smooth and serve.'],
+                               'product':product,'serving':serving,'liquid':liquid,'extras':extras,'grocery_text':grocery}
+                        saved=[m for m in favorite_meals_from_settings() if m.get('name')!='My Herbalife protein shake']
+                        saved.append(shake); set_setting('favorite_meals',saved)
+                        st.success('Herbalife shake saved. You can now tell the weekly planner to include it.')
 
-        with st.container(border=True):
-            st.markdown('### 🫙 Overnight oats')
-            st.write('A starter overnight-oats recipe is already available to the planner: oats + Greek yogurt + milk + chia seeds + berries.')
-            st.caption('You can still add your own custom go-to meal below if your overnight oats are different.')
+        if _food_extra_enabled('overnight_oats'):
+            with st.container(border=True):
+                st.markdown('### 🫙 Overnight oats')
+                st.write('A starter overnight-oats recipe is already available to the planner: oats + Greek yogurt + milk + chia seeds + berries.')
+                st.caption('You can still add your own custom go-to meal below if your overnight oats are different.')
 
-        with st.expander('➕ Add another go-to meal'):
+        with st.expander('➕ Create my own go-to meal',expanded=True):
             with st.form('custom_go_to'):
                 c=st.columns(2)
                 fav_name=c[0].text_input('Meal name')
@@ -4977,10 +5258,21 @@ def food():
         saved=favorite_meals_from_settings()
         if saved:
             st.markdown('#### Saved go-to meals')
-            for m in saved:
-                st.write(f"• **{m['name']}** — {m.get('cal',0)} cal · {m.get('protein',0)}g protein")
+            for i,m in enumerate(saved):
+                with st.container(border=True):
+                    c=st.columns([4,1])
+                    c[0].write(f"**{m['name']}** — {m.get('cal',0)} cal · {m.get('protein',0)}g protein · {m.get('type','Meal')}")
+                    # Protect built-in personal shortcuts from accidental deletion; custom meals are removable.
+                    protected=m.get('name') in ('My Herbalife protein shake','Overnight oats')
+                    if not protected and c[1].button('Delete',key=f"delete_goto_{i}_{re.sub(r'[^a-z0-9]','_',m['name'].lower())}"):
+                        kept=[x for x in saved if x.get('name')!=m.get('name')]
+                        set_setting('favorite_meals',kept)
+                        prefs=get_setting('meal_include_preferences',{}) or {}
+                        prefs['custom_go_tos']=[x for x in prefs.get('custom_go_tos',[]) if x!=m.get('name')]
+                        set_setting('meal_include_preferences',prefs)
+                        st.rerun()
 
-    with tabs[4]:
+    with tabs[tab_index['Today / Meal Counter']]:
         today=date.today().isoformat(); m=df_from('SELECT * FROM meals WHERE meal_date=? ORDER BY id DESC',(today,)); cal=m.calories.sum() if not m.empty else 0; protein=m.protein.sum() if not m.empty else 0
         target=safe_float((get_setting('food_profile',{}) or {}).get('calorie_target',0)); c=st.columns(3); c[0].metric('Calories logged today',f'{cal:.0f}'); c[1].metric('Protein logged',f'{protein:.0f} g'); c[2].metric('Target remaining',f'{max(0,target-cal):.0f}' if target else 'No target')
         if target: st.progress(min(1,cal/target if target else 0))
@@ -4990,17 +5282,96 @@ def food():
             note=st.text_input('Notes');
             if st.form_submit_button('Add manually'): execute('INSERT INTO meals(meal_date,meal_type,meal_name,calories,protein,source,place,rating,note) VALUES(?,?,?,?,?,?,?,?,?)',(today,mt,name,calories,protein_g,'Manual','','',note)); st.rerun()
         delete_reset_panel('meals','meal logs','meal_name')
-    with tabs[5]:
-        st.subheader('Eating Out / Restaurant Tracker')
-        place=st.text_input('Restaurant / café / bar / place',placeholder='Chipotle, Starbucks, local restaurant...'); item=st.text_input('Food or drink ordered'); custom=st.text_input('Customizations')
-        if place and item:
-            q=urllib.parse.quote_plus(f'{place} {item} calories nutrition'); st.link_button('🔎 Search web for nutrition',f'https://www.google.com/search?q={q}',use_container_width=True)
-        with st.form('restaurantlog',clear_on_submit=True):
-            c=st.columns(3); cal=c[0].number_input('Calories found / estimated',min_value=0.0,step=10.0); prot=c[1].number_input('Protein if known',min_value=0.0,step=1.0); source=c[2].selectbox('Source',['Official nutrition','Restaurant menu','Reliable database','Estimated','Entered myself']); note=st.text_input('Notes')
-            if st.form_submit_button('Add to today’s counter',use_container_width=True): execute('INSERT INTO meals(meal_date,meal_type,meal_name,calories,protein,source,place,rating,note) VALUES(?,?,?,?,?,?,?,?,?)',(date.today().isoformat(),'Other',item,cal,prot,source,place,'',f'{custom} {note}'.strip())); st.rerun()
+    with tabs[tab_index['Eating Out']]:
+        st.subheader('🍽️ Eating Out / Restaurant Calorie Finder')
+        st.caption('Find the restaurant first, then look up published nutrition for what you ordered. ChapLife shows the source and never invents a calorie number.')
 
-# ---------- Grocery ----------
-STORES=['Aldi','ShopRite','Stop & Shop','Target','Walmart','Whole Foods Market','Trader Joe’s','Key Food','Food Bazaar','Costco','BJ’s Wholesale Club','Other']
+        c=st.columns(2)
+        place_query=c[0].text_input('Restaurant / café / bar',placeholder='Chipotle, Starbucks, local restaurant...',key='eatout_place')
+        location_hint=c[1].text_input('City / area (optional)',placeholder='Brooklyn, NY',key='eatout_location')
+
+        selected_place=place_query.strip()
+        selected_address=''
+        if place_query.strip():
+            if GOOGLE_MAPS_API_KEY:
+                if st.button('📍 Find restaurant with Google',use_container_width=True,key='google_place_find'):
+                    st.session_state['restaurant_google_places']=google_place_lookup(
+                        f"{place_query} {location_hint}".strip()
+                    )
+                matches=st.session_state.get('restaurant_google_places',[])
+                if matches:
+                    options=list(range(len(matches)))
+                    chosen=st.selectbox(
+                        'Google restaurant match',options,
+                        format_func=lambda i:f"{matches[i]['name']} — {matches[i]['address']}",
+                        key='google_place_choice'
+                    )
+                    selected_place=matches[chosen]['name']
+                    selected_address=matches[chosen]['address']
+                    if matches[chosen].get('rating') is not None:
+                        st.caption(f"Google rating: {matches[chosen]['rating']} · {selected_address}")
+                elif st.session_state.get('restaurant_google_places')==[]:
+                    st.caption('No Google restaurant match found. You can still use the name you entered.')
+            else:
+                st.info('Google restaurant lookup is not connected yet. Add `GOOGLE_MAPS_API_KEY` to Streamlit Secrets to enable direct place lookup.')
+
+        item=st.text_input('Food or drink ordered',placeholder='Chicken burrito bowl, grande latte...',key='eatout_item')
+        custom=st.text_input('Customizations',placeholder='No cheese, extra chicken, oat milk...',key='eatout_custom')
+
+        if selected_place and item:
+            if GOOGLE_SEARCH_API_KEY and GOOGLE_SEARCH_CX:
+                if st.button('🔎 Generate calories from Google results',use_container_width=True,key='google_nutrition_find'):
+                    st.session_state['restaurant_nutrition_results']=google_nutrition_search(selected_place,item,custom)
+                found=st.session_state.get('restaurant_nutrition_results',[])
+                if found:
+                    st.markdown('#### Nutrition matches found')
+                    result_options=list(range(len(found)))
+                    chosen_result=st.radio(
+                        'Choose the result that matches what you ordered',
+                        result_options,
+                        format_func=lambda i:f"{found[i]['calories']} cal — {found[i]['domain'] or found[i]['title']}",
+                        key='nutrition_result_choice'
+                    )
+                    result=found[chosen_result]
+                    st.write(f"**{result['calories']} calories**")
+                    st.caption(result['snippet'])
+                    if result.get('url'):
+                        st.link_button('Open nutrition source',result['url'],use_container_width=True)
+                    st.caption('Google search result — verify serving size/customizations against the source before logging.')
+
+                    protein=st.number_input('Protein if known (g)',min_value=0.0,step=1.0,key='eatout_protein')
+                    note=st.text_input('Notes',key='eatout_note')
+                    if st.button('Add this to today’s counter',use_container_width=True,key='eatout_log_google'):
+                        execute(
+                            'INSERT INTO meals(meal_date,meal_type,meal_name,calories,protein,source,place,rating,note) VALUES(?,?,?,?,?,?,?,?,?)',
+                            (date.today().isoformat(),'Other',item,float(result['calories']),protein,
+                             f"Google result: {result['domain'] or 'web'}",selected_place,'',
+                             f"{custom} {note} Source: {result.get('url','')}".strip())
+                        )
+                        st.session_state.pop('restaurant_nutrition_results',None)
+                        st.success('Added to today’s counter.'); st.rerun()
+                elif st.session_state.get('restaurant_nutrition_results')==[]:
+                    st.warning('Google did not return a calorie number I could verify from the search snippets. Use the restaurant nutrition page or enter it manually below.')
+            else:
+                q=urllib.parse.quote_plus(f'{selected_place} {item} {custom} calories nutrition')
+                st.info('Direct Google nutrition lookup is not connected yet. Add `GOOGLE_SEARCH_API_KEY` and `GOOGLE_SEARCH_CX` to Streamlit Secrets.')
+                st.link_button('🔎 Search Google for nutrition',f'https://www.google.com/search?q={q}',use_container_width=True)
+
+        st.divider()
+        with st.expander('Enter calories manually / from a menu'):
+            with st.form('restaurantlog_manual',clear_on_submit=True):
+                c=st.columns(3)
+                cal=c[0].number_input('Calories',min_value=0.0,step=10.0)
+                prot=c[1].number_input('Protein if known',min_value=0.0,step=1.0)
+                source=c[2].selectbox('Source',['Official nutrition','Restaurant menu','Reliable database','Estimated','Entered myself'])
+                note=st.text_input('Notes')
+                if st.form_submit_button('Add to today’s counter',use_container_width=True):
+                    execute(
+                        'INSERT INTO meals(meal_date,meal_type,meal_name,calories,protein,source,place,rating,note) VALUES(?,?,?,?,?,?,?,?,?)',
+                        (date.today().isoformat(),'Other',item,cal,prot,source,selected_place,'',f'{custom} {note}'.strip())
+                    )
+                    st.rerun()
+
 def grocery():
     st.title('🛒 Grocery Shopping')
     week=date.today()-timedelta(days=date.today().weekday()); prof=get_setting('food_profile',{}) or {}; budget=safe_float(prof.get('budget',0)); store_saved=get_setting('grocery_store','Aldi')
@@ -7557,73 +7928,67 @@ def settings_page():
 
     st.subheader("🎨 Appearance")
     st.caption("Choose how your ChapLife looks. This only changes your account.")
-
     theme_opts=["Lavender","Ocean","Rose","Emerald","Sunset","Midnight","Neutral"]
     current_theme=get_setting("profile_theme","Lavender")
-    theme_cols=st.columns(4)
     theme_preview={
-        "Lavender":"💜 Lavender",
-        "Ocean":"🌊 Ocean",
-        "Rose":"🌹 Rose",
-        "Emerald":"🌿 Emerald",
-        "Sunset":"🌅 Sunset",
-        "Midnight":"🌙 Midnight",
-        "Neutral":"🤍 Neutral"
+        "Lavender":"💜 Lavender","Ocean":"🌊 Ocean","Rose":"🌹 Rose",
+        "Emerald":"🌿 Emerald","Sunset":"🌅 Sunset","Midnight":"🌙 Midnight","Neutral":"🤍 Neutral"
     }
-
     selected_theme=st.radio(
-        "Color theme",
-        theme_opts,
+        "Color theme",theme_opts,
         index=theme_opts.index(current_theme) if current_theme in theme_opts else 0,
-        format_func=lambda x:theme_preview[x],
-        horizontal=True,
-        key="settings_theme_choice"
+        format_func=lambda x:theme_preview[x],horizontal=True,key="settings_theme_choice"
     )
-
     if st.button("Save My Theme",use_container_width=True,key="save_personal_theme"):
-        set_setting("profile_theme",selected_theme)
-        st.success(f"{selected_theme} theme saved.")
-        st.rerun()
+        set_setting("profile_theme",selected_theme); st.success(f"{selected_theme} theme saved."); st.rerun()
 
     st.divider()
-
-    st.caption('Control what ChapLife shows, how planning works, and future account integrations.')
-
-    tabs=st.tabs(['Display & Progress','📅 Calendar','🥗 Meal Planning','🏋🏾‍♀️ Workout Planning','❤️ Health','Data & Privacy'])
+    tabs=st.tabs(['➕ Extra Features','Display & Progress','📅 Calendar','🥗 Meal Planning','🏋🏾‍♀️ Workout Planning','❤️ Health','Data & Privacy'])
 
     with tabs[0]:
-        st.subheader('Private section visibility')
-        st.write('Growth and Conversation are **hidden from the main app by default**. Turning them on only changes visibility; it does not delete or reset anything.')
-        show_growth_main=st.toggle('Show Growth Lab in navigation & dashboard',value=bool(get_setting('show_growth_section',False)),key='set_show_growth_main')
-        show_convo_main=st.toggle('Show Conversation & Current Events in navigation & dashboard',value=bool(get_setting('show_conversation_section',False)),key='set_show_convo_main')
-        if show_growth_main!=bool(get_setting('show_growth_section',False)):
-            set_setting('show_growth_section',show_growth_main); st.rerun()
-        if show_convo_main!=bool(get_setting('show_conversation_section',False)):
-            set_setting('show_conversation_section',show_convo_main); st.rerun()
+        st.subheader("➕ Extra Features")
+        if _is_owner():
+            st.info("Your owner account keeps your full ChapLife feature set automatically.")
+            st.write("**Always on for you:** Vocabulary, Water & Jug Puzzles, Growth Lab, Conversation & Current Events, Herbalife Bar, Overnight Oats, and Career Simulator.")
+        else:
+            st.write("Turn on only the extra tools you want. Turning one off hides it without deleting what you saved.")
+            extras=[
+                ("water_jugs","💧 Water & Jug Puzzles","Water tracking plus the jug puzzle game."),
+                ("vocabulary","📖 Vocabulary","Vocabulary practice, recall, pronunciation, and saved progress."),
+                ("growth","🌱 Growth Lab","Personal growth exercises and practice."),
+                ("conversation","💬 Conversation & Current Events","Conversation practice and current-events confidence tools."),
+                ("herbalife","🥤 Herbalife Bar","Herbalife product library and Herbalife-specific go-to shake tools."),
+                ("overnight_oats","🫙 Overnight Oats","Starter overnight-oats recipe and meal-plan shortcut.")
+            ]
+            changed=False
+            for key,label,desc in extras:
+                current=bool(get_setting(f"extra_feature_{key}",False))
+                with st.container(border=True):
+                    c=st.columns([4,1])
+                    c[0].markdown(f"**{label}**"); c[0].caption(desc)
+                    chosen=c[1].toggle("On",value=current,key=f"extra_toggle_{key}")
+                    if chosen!=current:
+                        set_setting(f"extra_feature_{key}",chosen); changed=True
+            if changed:
+                st.success("Extra Features updated."); st.rerun()
+            st.caption("Section-level extras disappear from navigation/Home when off. Food extras disappear only from Food & Nutrition.")
 
-        st.caption('When hidden, these section names do not appear on the Home dashboard or top navigation.')
-
-        st.divider()
+    with tabs[1]:
         st.subheader('My Progress sections')
-        st.write('You can separately hide their progress details too. Your saved information is not deleted.')
+        st.write('Hide optional progress details without deleting saved information.')
         show_growth=st.toggle('Show Growth in My Progress',value=bool(get_setting('progress_show_growth',False)),key='set_progress_growth')
         show_convo=st.toggle('Show Conversation in My Progress',value=bool(get_setting('progress_show_conversation',False)),key='set_progress_convo')
         if show_growth!=bool(get_setting('progress_show_growth',False)):
             set_setting('progress_show_growth',show_growth); st.rerun()
         if show_convo!=bool(get_setting('progress_show_conversation',False)):
             set_setting('progress_show_conversation',show_convo); st.rerun()
+        st.info('Use Extra Features to add or remove optional tools from the app itself.')
 
-        st.divider()
-        st.subheader('Dashboard visibility')
-        st.caption('These controls can later be expanded so you can hide whole dashboard cards too.')
-        st.info('Growth Lab and Conversation remain available from the main navigation even when hidden from My Progress.')
-
-    with tabs[1]:
+    with tabs[2]:
         st.subheader('📅 Google Calendar')
         if st.session_state.get("google_oauth_notice"):
             notice=st.session_state.pop("google_oauth_notice")
             st.success(notice) if notice.startswith("✅") else st.warning(notice)
-
         if not GOOGLE_CAL_CONFIGURED:
             st.error('Google OAuth is not configured yet.')
             st.write('Add `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, and `GOOGLE_REDIRECT_URI` to Streamlit Secrets after creating the Google OAuth web client.')
@@ -7644,66 +8009,51 @@ def settings_page():
                 except Exception as e: st.error(str(e))
             if b.button('Disconnect Google Calendar',use_container_width=True,key='google_disconnect'):
                 google_calendar_disconnect(); st.rerun()
-
             events=df_from("SELECT * FROM calendar_planning WHERE source='Google Calendar' ORDER BY event_date,start_time")
             st.markdown('#### Upcoming imported events')
-            if events.empty:
-                st.info('No upcoming events are currently imported.')
-            else:
-                st.dataframe(events[['event_date','event_title','start_time','end_time','planning_effect']],use_container_width=True,hide_index=True)
-
+            if events.empty: st.info('No upcoming events are currently imported.')
+            else: st.dataframe(events[['event_date','event_title','start_time','end_time','planning_effect']],use_container_width=True,hide_index=True)
         st.divider()
-        st.markdown('**How ChapLife should use calendar events:**')
         use_meals=st.toggle('Adjust meal plans around busy days',value=bool(get_setting('calendar_meal_planning',True)),key='calmeal')
         use_workouts=st.toggle('Adjust workout length/timing around events',value=bool(get_setting('calendar_workout_planning',True)),key='calwork')
         away=st.toggle('Flag days when I may need a meal away from home',value=bool(get_setting('calendar_away_meals',True)),key='calaway')
         travel=st.number_input('Default travel buffer around events (minutes)',min_value=0,max_value=180,step=5,value=int(get_setting('calendar_travel_buffer',30) or 30))
         if st.button('Save Calendar Planning Preferences',use_container_width=True):
-            set_setting('calendar_meal_planning',use_meals)
-            set_setting('calendar_workout_planning',use_workouts)
-            set_setting('calendar_away_meals',away)
-            set_setting('calendar_travel_buffer',travel)
-            st.success('Calendar planning preferences saved.')
+            set_setting('calendar_meal_planning',use_meals); set_setting('calendar_workout_planning',use_workouts)
+            set_setting('calendar_away_meals',away); set_setting('calendar_travel_buffer',travel); st.success('Calendar planning preferences saved.')
 
-    with tabs[2]:
+    with tabs[3]:
         st.subheader('🥗 Meal planning preferences')
         meals_per_day=st.selectbox('Typical meals per day',[2,3,4,5],index=max(0,min(3,int(get_setting('meal_count',3) or 3)-2)))
         cook_time=st.selectbox('Typical cooking time',['10–15 minutes','20–30 minutes','30–45 minutes','I am flexible'],index=0)
         leftovers=st.toggle('Use leftovers to reduce waste',value=bool(get_setting('meal_use_leftovers',True)))
         if st.button('Save Meal Preferences',use_container_width=True):
-            set_setting('meal_count',meals_per_day); set_setting('meal_cook_time',cook_time); set_setting('meal_use_leftovers',leftovers)
-            st.success('Meal preferences saved.')
+            set_setting('meal_count',meals_per_day); set_setting('meal_cook_time',cook_time); set_setting('meal_use_leftovers',leftovers); st.success('Meal preferences saved.')
 
-    with tabs[3]:
+    with tabs[4]:
         st.subheader('🏋🏾‍♀️ Workout planning preferences')
         busy_length=st.selectbox('Workout length on busy days',['10 minutes','15 minutes','20 minutes','30 minutes'],index=2)
         normal_length=st.selectbox('Workout length on normal days',['20 minutes','30 minutes','40 minutes','45 minutes','60 minutes'],index=2)
         calendar_adjust=st.toggle('Let calendar busyness shorten a workout suggestion',value=bool(get_setting('workout_calendar_adjust',True)))
         if st.button('Save Workout Preferences',use_container_width=True):
-            set_setting('workout_busy_length',busy_length); set_setting('workout_normal_length',normal_length); set_setting('workout_calendar_adjust',calendar_adjust)
-            st.success('Workout preferences saved.')
+            set_setting('workout_busy_length',busy_length); set_setting('workout_normal_length',normal_length); set_setting('workout_calendar_adjust',calendar_adjust); st.success('Workout preferences saved.')
 
-    with tabs[4]:
+    with tabs[5]:
         st.subheader('❤️ Health preferences')
-        st.write('Control how health information is used in planning.')
         cycle_adjust=st.toggle('Allow logged energy/cycle information to suggest lighter workout options',value=bool(get_setting('health_cycle_adjust',True)))
         samsung=st.toggle('Use Samsung Health activity history in progress summaries',value=bool(get_setting('health_use_samsung',True)))
         nutrients=st.toggle('Include supplement-label nutrients in nutrient summaries',value=bool(get_setting('health_use_supplement_nutrients',True)))
         if st.button('Save Health Preferences',use_container_width=True):
-            set_setting('health_cycle_adjust',cycle_adjust); set_setting('health_use_samsung',samsung); set_setting('health_use_supplement_nutrients',nutrients)
-            st.success('Health preferences saved.')
+            set_setting('health_cycle_adjust',cycle_adjust); set_setting('health_use_samsung',samsung); set_setting('health_use_supplement_nutrients',nutrients); st.success('Health preferences saved.')
 
-    with tabs[5]:
+    with tabs[6]:
         st.subheader('Data & privacy')
         st.success('☁️ Private Supabase sync is active for your signed-in ChapLife account.')
-        st.info('🔄 Automatic sync runs every **2 minutes** while ChapLife is open. Saves also continue syncing after normal app changes, and the manual Sync button remains available.')
-        st.write('The app code remains on GitHub, while your ChapLife database is stored as private per-user cloud state protected by Supabase authentication and Row Level Security.')
-        st.warning('Do not upload `chaplife.db`, financial exports, health screenshots, medicine-label photos, passwords, or API credentials to the public GitHub repository.')
+        st.info('🔄 Automatic sync runs every **2 minutes** while ChapLife is open.')
+        st.warning('Do not upload private databases, financial exports, health screenshots, passwords, or API credentials to the public GitHub repository.')
         devmode=st.toggle('Developer Mode (show technical diagnostics)',value=bool(get_setting('developer_mode',False)),key='developer_mode_toggle')
         if devmode!=bool(get_setting('developer_mode',False)):
             set_setting('developer_mode',devmode); st.rerun()
-        st.caption('Developer Mode is off by default. Normal ChapLife use keeps technical error details hidden.')
-        st.caption(f"Last sync: {st.session_state.get('_cloud_last_sync','this session')}")
         c=st.columns(2)
         if c[0].button('☁️ Back up to cloud now',use_container_width=True,key='settings_cloud_push'):
             try: cloud_push_db(); st.success('Cloud backup complete.')
@@ -7714,7 +8064,6 @@ def settings_page():
                 else: st.info('No cloud copy found yet.')
             except Exception as e: st.error(str(e))
 
-# ---------- Progress ----------
 def progress():
     st.title('📈 My Progress')
     show_growth=bool(get_setting('progress_show_growth',False))
