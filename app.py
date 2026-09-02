@@ -21,7 +21,7 @@ def current_db_path():
 
 st.set_page_config(page_title='ChapLife', page_icon='✨', layout='wide', initial_sidebar_state='collapsed')
 
-BUILD_VERSION='LifeMode 7.2.15 · Member Feature Access Fix'
+BUILD_VERSION='LifeMode 7.2.18 · Green Login Rebrand'
 
 # Optional Google lookup keys for restaurant/nutrition tools.
 GOOGLE_MAPS_API_KEY=str(st.secrets.get("GOOGLE_MAPS_API_KEY","") or "").strip()
@@ -2701,6 +2701,35 @@ def cloud_logout():
         st.session_state.pop(k,None)
 
 def cloud_auth_gate():
+
+    st.markdown("""
+    <style>
+      :root{--lm-green:#188038;--lm-ink:#182235;--lm-muted:#667085;--lm-border:#e2e6ea;}
+      div[data-testid="stForm"]{
+        border:1px solid var(--lm-border);border-radius:24px;padding:1.05rem 1.1rem 1.2rem;
+        background:rgba(255,255,255,.97);box-shadow:0 10px 28px rgba(24,34,53,.045);
+      }
+      div[data-baseweb="input"] > div:focus-within{
+        border-color:var(--lm-green)!important;box-shadow:0 0 0 1px var(--lm-green)!important;
+      }
+      div[data-testid="stFormSubmitButton"] button{border-radius:16px!important;}
+    </style>
+    <div style="max-width:860px;margin:8px auto 18px;padding:34px 38px;background:rgba(255,255,255,.98);
+                border:1px solid #e2e6ea;border-radius:28px;box-shadow:0 16px 44px rgba(24,34,53,.07);">
+      <div style="display:flex;align-items:center;gap:26px;">
+        <div style="width:92px;height:92px;min-width:92px;border-radius:22px;display:flex;align-items:center;
+                    justify-content:center;background:linear-gradient(145deg,#fff,#f4f8f5);border:1px solid #e3e9e5;
+                    box-shadow:0 8px 20px rgba(24,128,56,.08);font-size:42px;font-weight:800;letter-spacing:-5px;color:#182235;">
+          L<span style="color:#188038;">M</span>
+        </div>
+        <div>
+          <div style="font-size:46px;line-height:1;font-weight:800;letter-spacing:-1.8px;color:#182235;">LifeMode</div>
+          <div style="width:70px;height:4px;background:#188038;border-radius:20px;margin:17px 0 14px;"></div>
+          <div style="font-size:18px;color:#667085;">Private, personal, and built around your life.</div>
+        </div>
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
     owner_session=st.session_state.get("_chaplife_cloud_session")
     member_id=st.session_state.get("_chaplife_member_id")
 
@@ -2708,7 +2737,7 @@ def cloud_auth_gate():
     if not owner_session and not member_id and not st.session_state.get("_finish_member_setup"):
         st.markdown(
             '<div class="chap-auth-shell"><div class="chap-auth-mark">✨</div>'
-            '<h1>ChapLife</h1><p>Private, personal, and built around your life.</p></div>',
+            '<h1>LifeMode</h1><p>Private, personal, and built around your life.</p></div>',
             unsafe_allow_html=True
         )
 
@@ -2776,15 +2805,15 @@ def cloud_auth_gate():
 
         else:
             with st.form("simple_first_access"):
-                code=st.text_input("ChapLife access code",type="password")
+                code=st.text_input("LifeMode access code",type="password")
                 full_name=st.text_input("Your full name",placeholder="Use the name Chennel has for you")
                 go=st.form_submit_button("Continue",use_container_width=True)
                 if go:
                     expected=_shared_access_pin()
                     if not expected:
-                        st.warning("The ChapLife access code has not been set yet.")
+                        st.warning("The LifeMode access code has not been set yet.")
                     elif not hmac.compare_digest(str(code).strip(),str(expected).strip()):
-                        st.error("That ChapLife access code isn't correct.")
+                        st.error("That LifeMode access code isn't correct.")
                     elif not full_name.strip():
                         st.warning("Enter your full name.")
                     else:
@@ -2900,7 +2929,7 @@ def cloud_auth_gate():
                 cloud_push_db()
             st.session_state["_cloud_loaded"]=True
         except Exception:
-            st.error("ChapLife could not load your private data.")
+            st.error("LifeMode could not load your private data.")
             if st.button("Sign out"):
                 cloud_logout()
                 st.rerun()
