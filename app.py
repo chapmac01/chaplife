@@ -21,7 +21,7 @@ def current_db_path():
 
 st.set_page_config(page_title='ChapLife', page_icon='✨', layout='wide', initial_sidebar_state='collapsed')
 
-BUILD_VERSION='LifeMode 7.2.18 · Green Login Rebrand'
+BUILD_VERSION='LifeMode 7.2.15 · Member Feature Access Fix'
 
 # Optional Google lookup keys for restaurant/nutrition tools.
 GOOGLE_MAPS_API_KEY=str(st.secrets.get("GOOGLE_MAPS_API_KEY","") or "").strip()
@@ -176,25 +176,48 @@ input, textarea, [data-baseweb="select"] > div {
   border-radius:14px !important;
 }
 .chap-auth-shell {
-  max-width:760px; margin:2.4rem auto .8rem; padding:2rem;
-  border:1px solid rgba(120,120,145,.18); border-radius:30px;
-  background:rgba(255,255,255,.62); backdrop-filter:blur(20px);
-  box-shadow:0 24px 80px rgba(20,20,40,.08);
+  max-width:760px; margin:2.4rem auto .8rem; padding:2rem 2.2rem;
+  border:1px solid rgba(45,70,56,.14); border-radius:30px;
+  background:rgba(255,255,255,.78); backdrop-filter:blur(20px);
+  box-shadow:0 24px 80px rgba(20,45,30,.08);
 }
+.chap-auth-brand {display:flex;align-items:center;gap:1.35rem;}
+.chap-auth-copy {min-width:0;}
 .chap-auth-mark {
-  width:54px;height:54px;border-radius:18px;display:flex;align-items:center;justify-content:center;
-  background:linear-gradient(135deg,rgba(116,91,255,.15),rgba(0,172,193,.12));
-  font-size:1.7rem;margin-bottom:.8rem;
+  width:76px;height:76px;flex:0 0 76px;border-radius:22px;
+  display:flex;align-items:center;justify-content:center;
+  background:linear-gradient(145deg,#ffffff,#f2f7f3);
+  border:1px solid rgba(45,70,56,.12);
+  box-shadow:0 12px 28px rgba(24,80,48,.10);
+  color:#20242b;font-size:1.8rem;font-weight:850;letter-spacing:-.16rem;
+  margin:0;
 }
-.chap-auth-shell h1 {margin:.1rem 0 .35rem;font-size:2.2rem;letter-spacing:-.04em;}
-.chap-auth-shell p {margin:0;opacity:.68;}
+.chap-auth-mark .lm-green {color:#23834b;}
+.chap-auth-shell h1 {
+  margin:0;font-size:2.55rem;line-height:1;font-weight:800;
+  letter-spacing:-.055em;color:#172033;
+}
+.chap-auth-accent {
+  width:70px;height:4px;border-radius:999px;background:#23834b;
+  margin:.8rem 0 .7rem;
+}
+.chap-auth-shell p {margin:0;color:#687184;opacity:1;font-size:1rem;}
+/* v7.2.19: only the approved LifeMode login brand card may show */
+.chap-auth-shell:not(.lm-primary-auth):not(.lm-setup-auth) {
+  display:none !important;
+}
+
+.stFormSubmitButton>button:hover {border-color:#23834b !important;color:#1d6f40 !important;}
 .chap-status {
   display:inline-block;padding:.28rem .65rem;border-radius:999px;font-size:.78rem;font-weight:750;
   background:rgba(120,120,145,.10);
 }
 @media (max-width:640px){
-  .chap-auth-shell {margin:.7rem 0;padding:1.1rem;border-radius:22px;}
-  .chap-auth-shell h1 {font-size:1.75rem;}
+  .chap-auth-shell {margin:.7rem 0;padding:1.15rem;border-radius:22px;}
+  .chap-auth-brand {gap:.9rem;}
+  .chap-auth-mark {width:60px;height:60px;flex-basis:60px;border-radius:18px;font-size:1.45rem;}
+  .chap-auth-shell h1 {font-size:1.9rem;}
+  .chap-auth-shell p {font-size:.9rem;}
 }
 </style>
 ''', unsafe_allow_html=True)
@@ -2701,43 +2724,16 @@ def cloud_logout():
         st.session_state.pop(k,None)
 
 def cloud_auth_gate():
-
-    st.markdown("""
-    <style>
-      :root{--lm-green:#188038;--lm-ink:#182235;--lm-muted:#667085;--lm-border:#e2e6ea;}
-      div[data-testid="stForm"]{
-        border:1px solid var(--lm-border);border-radius:24px;padding:1.05rem 1.1rem 1.2rem;
-        background:rgba(255,255,255,.97);box-shadow:0 10px 28px rgba(24,34,53,.045);
-      }
-      div[data-baseweb="input"] > div:focus-within{
-        border-color:var(--lm-green)!important;box-shadow:0 0 0 1px var(--lm-green)!important;
-      }
-      div[data-testid="stFormSubmitButton"] button{border-radius:16px!important;}
-    </style>
-    <div style="max-width:860px;margin:8px auto 18px;padding:34px 38px;background:rgba(255,255,255,.98);
-                border:1px solid #e2e6ea;border-radius:28px;box-shadow:0 16px 44px rgba(24,34,53,.07);">
-      <div style="display:flex;align-items:center;gap:26px;">
-        <div style="width:92px;height:92px;min-width:92px;border-radius:22px;display:flex;align-items:center;
-                    justify-content:center;background:linear-gradient(145deg,#fff,#f4f8f5);border:1px solid #e3e9e5;
-                    box-shadow:0 8px 20px rgba(24,128,56,.08);font-size:42px;font-weight:800;letter-spacing:-5px;color:#182235;">
-          L<span style="color:#188038;">M</span>
-        </div>
-        <div>
-          <div style="font-size:46px;line-height:1;font-weight:800;letter-spacing:-1.8px;color:#182235;">LifeMode</div>
-          <div style="width:70px;height:4px;background:#188038;border-radius:20px;margin:17px 0 14px;"></div>
-          <div style="font-size:18px;color:#667085;">Private, personal, and built around your life.</div>
-        </div>
-      </div>
-    </div>
-    """, unsafe_allow_html=True)
     owner_session=st.session_state.get("_chaplife_cloud_session")
     member_id=st.session_state.get("_chaplife_member_id")
 
     # Existing owner cloud session remains valid, but there is no public owner-only login section.
     if not owner_session and not member_id and not st.session_state.get("_finish_member_setup"):
         st.markdown(
-            '<div class="chap-auth-shell"><div class="chap-auth-mark">✨</div>'
-            '<h1>LifeMode</h1><p>Private, personal, and built around your life.</p></div>',
+            '<div class="chap-auth-shell lm-primary-auth"><div class="chap-auth-brand">'
+            '<div class="chap-auth-mark">L<span class="lm-green">M</span></div>'
+            '<div class="chap-auth-copy"><h1>LifeMode</h1><div class="chap-auth-accent"></div>'
+            '<p>Private, personal, and built around your life.</p></div></div></div>',
             unsafe_allow_html=True
         )
 
@@ -2805,15 +2801,15 @@ def cloud_auth_gate():
 
         else:
             with st.form("simple_first_access"):
-                code=st.text_input("LifeMode access code",type="password")
+                code=st.text_input("ChapLife access code",type="password")
                 full_name=st.text_input("Your full name",placeholder="Use the name Chennel has for you")
                 go=st.form_submit_button("Continue",use_container_width=True)
                 if go:
                     expected=_shared_access_pin()
                     if not expected:
-                        st.warning("The LifeMode access code has not been set yet.")
+                        st.warning("The ChapLife access code has not been set yet.")
                     elif not hmac.compare_digest(str(code).strip(),str(expected).strip()):
-                        st.error("That LifeMode access code isn't correct.")
+                        st.error("That ChapLife access code isn't correct.")
                     elif not full_name.strip():
                         st.warning("Enter your full name.")
                     else:
@@ -2868,7 +2864,7 @@ def cloud_auth_gate():
             st.rerun()
 
         st.markdown(
-            '<div class="chap-auth-shell"><div class="chap-auth-mark">👋</div>'
+            '<div class="chap-auth-shell lm-setup-auth"><div class="chap-auth-mark">👋</div>'
             f'<h1>Welcome, {html.escape(person.get("display_name") or "friend")}</h1>'
             '<p>Create the password you will use from now on.</p></div>',
             unsafe_allow_html=True
@@ -2929,7 +2925,7 @@ def cloud_auth_gate():
                 cloud_push_db()
             st.session_state["_cloud_loaded"]=True
         except Exception:
-            st.error("LifeMode could not load your private data.")
+            st.error("ChapLife could not load your private data.")
             if st.button("Sign out"):
                 cloud_logout()
                 st.rerun()
