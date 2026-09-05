@@ -4698,7 +4698,7 @@ def finances():
                 pid=p["id"]; _sync_due_bills_for_paycheck(pid); _command_center(p); _edit_paycheck_panel(p,"plan")
                 start,end=_paycheck_window_smart(pid)
                 st.markdown(f"### Due {us_date(start)} – {us_date(end-timedelta(days=1))}")
-                for x in rows("SELECT * FROM paycheck_plan_items WHERE paycheck_id=? ORDER BY COALESCE(due_date,'9999-12-31'),id",(pid,)):
+                for x in rows("SELECT * FROM paycheck_plan_items WHERE paycheck_id=? AND COALESCE(status,'Planned')!='Removed from plan' ORDER BY COALESCE(due_date,'9999-12-31'),id",(pid,)):
                     with st.container(border=True):
                         c=st.columns([2.2,1,1,1])
                         due=f" · Due {us_date(x['due_date'])}" if x["due_date"] else ""
@@ -4719,7 +4719,22 @@ def finances():
                             if c2.button("✓ Paid",key=f"plan_paid_{x['id']}",use_container_width=True):
                                 execute("UPDATE paycheck_plan_items SET status='Paid',actual_amount=?,paid_date=? WHERE id=?",(actual,pdate.isoformat(),x["id"])); st.rerun()
                         if st.button("Remove from this plan",key=f"plan_remove_{x['id']}"):
-                            execute("DELETE FROM paycheck_plan_items WHERE id=?",(x["id"],)); st.rerun()
+                            # Keep the record so auto-synced bills do not immediately come back on rerun.
+                            execute("UPDATE paycheck_plan_items SET status='Removed from plan' WHERE id=?",(x["id"],))
+                            st.toast("Removed from this paycheck plan.")
+                            st.rerun()
+
+                removed_items=rows("SELECT * FROM paycheck_plan_items WHERE paycheck_id=? AND status='Removed from plan' ORDER BY COALESCE(due_date,'9999-12-31'),id",(pid,))
+                if removed_items:
+                    with st.expander(f"Removed from this plan ({len(removed_items)})"):
+                        st.caption("These items stay out of this paycheck plan unless you restore them.")
+                        for rx in removed_items:
+                            rc=st.columns([3,1])
+                            rd=f" · Due {us_date(rx['due_date'])}" if rx['due_date'] else ""
+                            rc[0].markdown(f"**{rx['name']}** — {money(rx['planned_amount'])}{rd}")
+                            if rc[1].button("↩ Restore",key=f"plan_restore_{rx['id']}",use_container_width=True):
+                                execute("UPDATE paycheck_plan_items SET status='Planned' WHERE id=?",(rx["id"],))
+                                st.rerun()
 
                 st.markdown("### Affirm / Klarna / payment-provider payments due")
                 inst=_bnpl_due_in_window(pid)
