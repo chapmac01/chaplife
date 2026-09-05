@@ -3582,6 +3582,45 @@ def create_bnpl_purchase(provider,merchant,purchase_date,total,frequency,count,f
     reassign_bnpl_installments()
     return pid
 
+def _advance_payment_date(d, frequency):
+    if frequency == "Weekly":
+        return d + timedelta(days=7)
+    if frequency == "Every 2 weeks":
+        return d + timedelta(days=14)
+    if frequency == "Monthly":
+        return _add_months(d,1)
+    return d
+
+def regenerate_bnpl_schedule(purchase_id, first_due, frequency, payment_amount):
+    """Rebuild only unpaid/planned installments from the saved payment settings. Paid history is preserved."""
+    purchase=rows("SELECT * FROM bnpl_purchases WHERE id=?",(purchase_id,))
+    if not purchase:
+        return 0
+    p=purchase[0]
+    remaining=max(0.0,float(p["remaining_balance"] or 0))
+    amount=round(float(payment_amount or 0),2)
+    if frequency == "Custom schedule" or amount <= 0 or remaining <= 0:
+        return 0
+    # Settings represent the future schedule, so replace only unpaid planned rows.
+    execute("DELETE FROM bnpl_installments WHERE purchase_id=? AND status='Planned'",(purchase_id,))
+    due=first_due
+    left=round(remaining,2)
+    created=0
+    # Safety cap prevents a bad tiny amount from creating thousands of rows.
+    while left > 0.004 and created < 240:
+        this_amt=round(min(amount,left),2)
+        if this_amt <= 0:
+            break
+        execute("INSERT INTO bnpl_installments(purchase_id,due_date,amount,status) VALUES(?,?,?,'Planned')",
+                (purchase_id,due.isoformat(),this_amt))
+        left=round(left-this_amt,2)
+        created+=1
+        due=_advance_payment_date(due,frequency)
+    execute("UPDATE bnpl_purchases SET installment_count=?,first_payment_date=? WHERE id=?",
+            (created,first_due.isoformat(),purchase_id))
+    reassign_bnpl_installments()
+    return created
+
 def mark_bnpl_installment_paid(inst_id,paid_date=None):
     paid_date=paid_date or date.today()
     inst=rows("""SELECT i.*,p.provider,p.merchant,p.id purchase_id
@@ -4144,15 +4183,35 @@ def _render_provider_wallet(provider,keyprefix):
 
             st.markdown("**Payment settings**")
             try:
-                pc=st.columns(3)
+                existing_planned=rows("SELECT * FROM bnpl_installments WHERE purchase_id=? AND status='Planned' ORDER BY due_date,id",(bid,))
+                inferred_amount=float(existing_planned[0]["amount"] or 0) if existing_planned else 0.0
+                if inferred_amount<=0 and remaining>0:
+                    cnt=int(bp["installment_count"] or 0) if "installment_count" in bp.keys() else 0
+                    inferred_amount=round(remaining/max(1,cnt),2) if cnt else round(remaining,2)
+                pc=st.columns(4)
                 freq_options=["Weekly","Every 2 weeks","Monthly","Custom schedule"]
                 current_freq=(bp["payment_frequency"] or "Every 2 weeks") if "payment_frequency" in bp.keys() else "Every 2 weeks"
                 if current_freq not in freq_options: current_freq="Every 2 weeks"
                 nfreq=pc[0].selectbox("Frequency",freq_options,index=freq_options.index(current_freq),key=f"{keyprefix}_editfreq_{bid}")
                 nauto=pc[1].checkbox("Autopay",value=bool(bp["autopay"] or 0) if "autopay" in bp.keys() else False,key=f"{keyprefix}_autopay_{bid}")
-                nnext=pc[2].date_input("Next payment date",value=(date.fromisoformat(bp["next_payment_date"]) if "next_payment_date" in bp.keys() and bp["next_payment_date"] else date.today()),format="MM/DD/YYYY",key=f"{keyprefix}_nextpay_{bid}")
+                nnext=pc[2].date_input("Next payment date",value=(date.fromisoformat(bp["next_payment_date"]) if "next_payment_date" in bp.keys() and bp["next_payment_date"] else (date.fromisoformat(existing_planned[0]["due_date"]) if existing_planned else date.today())),format="MM/DD/YYYY",key=f"{keyprefix}_nextpay_{bid}")
+                npayment=pc[3].number_input("Scheduled payment",min_value=0.0,value=float(inferred_amount),step=1.0,key=f"{keyprefix}_scheduled_amt_{bid}")
+                if nfreq!="Custom schedule" and npayment>0:
+                    est=max(1,math.ceil(max(0.0,remaining)/npayment)) if remaining else 0
+                    st.caption(f"Saving these settings will automatically build about {est} future payment{'s' if est!=1 else ''} from the remaining balance. You can edit any installment afterward.")
+                else:
+                    st.caption("Custom schedule keeps the dates in your hands. Add each installment manually below.")
                 if st.button("💾 Save Payment Settings",key=f"{keyprefix}_save_schedule_settings_{bid}",use_container_width=True):
-                    execute("UPDATE bnpl_purchases SET payment_frequency=?,autopay=?,next_payment_date=? WHERE id=?",(nfreq,1 if nauto else 0,nnext.isoformat(),bid)); st.rerun()
+                    execute("UPDATE bnpl_purchases SET payment_frequency=?,autopay=?,next_payment_date=? WHERE id=?",(nfreq,1 if nauto else 0,nnext.isoformat(),bid))
+                    if nfreq!="Custom schedule":
+                        if npayment<=0:
+                            st.warning("Enter a scheduled payment amount so LifeMode can build the payment schedule.")
+                        else:
+                            made=regenerate_bnpl_schedule(bid,nnext,nfreq,npayment)
+                            st.success(f"Payment settings saved. {made} future installment{'s' if made!=1 else ''} generated automatically.")
+                    else:
+                        st.success("Payment settings saved. Add your custom installments below.")
+                    st.rerun()
             except Exception as err:
                 print(f"LifeMode {provider} payment settings error {bid}:",repr(err))
 
@@ -4194,7 +4253,23 @@ def _render_provider_wallet(provider,keyprefix):
                                 if a.button("✓ Mark Paid",key=f"{keyprefix}_instpaid_{inst['id']}"):
                                     mark_bnpl_installment_paid(inst["id"],date.today()); st.rerun()
                                 if b.button("Remove installment",key=f"{keyprefix}_instremove_{inst['id']}"):
-                                    execute("DELETE FROM bnpl_installments WHERE id=?",(inst["id"],)); st.rerun()
+                                    execute("DELETE FROM bnpl_installments WHERE id=?",(inst["id"],)); reassign_bnpl_installments(); st.rerun()
+
+                st.markdown("**➕ Add an installment manually**")
+                ac=st.columns([1.2,1,1.1])
+                default_manual=(date.fromisoformat(existing_planned[-1]["due_date"]) if existing_planned else nnext)
+                if existing_planned and nfreq!="Custom schedule":
+                    default_manual=_advance_payment_date(default_manual,nfreq)
+                adate=ac[0].date_input("Due date",default_manual,format="MM/DD/YYYY",key=f"{keyprefix}_manual_date_{bid}")
+                aamt=ac[1].number_input("Amount",min_value=0.0,value=float(npayment if 'npayment' in locals() else 0.0),step=1.0,key=f"{keyprefix}_manual_amt_{bid}")
+                if ac[2].button("➕ Add to Schedule",key=f"{keyprefix}_manual_add_{bid}",use_container_width=True):
+                    if aamt<=0:
+                        st.warning("Enter an installment amount greater than $0.")
+                    else:
+                        execute("INSERT INTO bnpl_installments(purchase_id,due_date,amount,status) VALUES(?,?,?,'Planned')",(bid,adate.isoformat(),float(aamt)))
+                        reassign_bnpl_installments()
+                        st.success("Installment added to the schedule.")
+                        st.rerun()
             except Exception as err:
                 print(f"ChapLife {provider} schedule error {bid}:",repr(err))
                 st.caption("The payment schedule could not be displayed, but the account is still saved.")
@@ -6512,13 +6587,13 @@ def current_events():
                     st.session_state.practice_story=item['title']; st.session_state.practice_cat=cat; st.session_state.conv_history=[]; st.success('Loaded into Conversation Practice.')
     with tabs[1]:
         st.write('### People to know')
-        st.caption('Type a person you keep hearing about. ChapLife will pull a quick visual/profile search so you can connect the face, name, and context.')
+        st.caption('Type a person you keep hearing about. LifeMode will pull a quick visual/profile search so you can connect the face, name, and context.')
         person=st.text_input('Person’s name')
         if person:
             q=urllib.parse.quote(person)
             st.markdown(f"[See photos and profile for {person}](https://www.google.com/search?tbm=isch&q={q})")
             st.markdown(f"[Quick background on Wikipedia](https://en.wikipedia.org/w/index.php?search={q})")
-            st.info('When ChapLife is hosted online, this panel can be upgraded to show the image and profile directly inside the app.')
+            st.info('When LifeMode is hosted online, this panel can be upgraded to show the image and profile directly inside the app.')
     with tabs[2]:
         story=st.session_state.get('practice_story','Choose a story in Catch Me Up first')
         st.write('**Topic:** '+story)
@@ -8426,9 +8501,11 @@ def friendly_app_error(section="this section"):
 page=st.session_state.page
 if page=='User Management' and not _is_owner():
     page='Home'; st.session_state.page='Home'
-if page=='Growth Lab' and not bool(get_setting('show_growth_section',False)):
+# Feature access guard must match the navigation policy above.
+# Owners always have Growth + Conversation. Members can enable Conversation in Extra Features.
+if page=='Growth Lab' and not _is_owner():
     page='Home'; st.session_state.page='Home'
-if page=='Conversation & Current Events' and not bool(get_setting('show_conversation_section',False)):
+if page=='Conversation & Current Events' and (not _is_owner()) and not bool(get_setting('extra_feature_conversation',False)):
     page='Home'; st.session_state.page='Home'
 
 _renderers={
