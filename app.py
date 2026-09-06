@@ -19,9 +19,9 @@ def current_db_path():
         return APP_DIR / f".chaplife_member_{safe}.db"
     return OWNER_DB_PATH
 
-st.set_page_config(page_title='ChapLife', page_icon='✨', layout='wide', initial_sidebar_state='collapsed')
+st.set_page_config(page_title='LifeMode', page_icon='✨', layout='wide', initial_sidebar_state='collapsed')
 
-BUILD_VERSION='LifeMode 7.2.15 · Autopay Plan + Held Money'
+BUILD_VERSION='LifeMode 7.2.22 · Hard Private Workspace Reset'
 
 # Optional Google lookup keys for restaurant/nutrition tools.
 GOOGLE_MAPS_API_KEY=str(st.secrets.get("GOOGLE_MAPS_API_KEY","") or "").strip()
@@ -35,7 +35,7 @@ def _food_extra_enabled(key):
     return bool(get_setting(f"extra_feature_{key}",False))
 
 def _google_json(url,headers=None,timeout=12):
-    req=urllib.request.Request(url,headers=headers or {"User-Agent":"ChapLife/1.0"})
+    req=urllib.request.Request(url,headers=headers or {"User-Agent":"LifeMode/1.0"})
     with urllib.request.urlopen(req,timeout=timeout) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
@@ -196,6 +196,18 @@ input, textarea, [data-baseweb="select"] > div {
   .chap-auth-shell {margin:.7rem 0;padding:1.1rem;border-radius:22px;}
   .chap-auth-shell h1 {font-size:1.75rem;}
 }
+/* LifeMode visual shell */
+.stApp { background-color: var(--chap-soft-2, #fcfbff); }
+h1, h2, h3 { letter-spacing:-.025em; }
+[data-testid="stMetric"] {
+  background:rgba(255,255,255,.66); border:1px solid rgba(125,125,150,.15);
+  border-radius:20px; padding:.75rem .9rem; box-shadow:0 10px 32px rgba(20,20,40,.045);
+}
+[data-testid="stDataFrame"], [data-testid="stTable"] {
+  border-radius:18px; overflow:hidden;
+}
+.stTabs [data-baseweb="tab-list"] { gap:.35rem; }
+.stTabs [data-baseweb="tab"] { border-radius:999px; padding:.45rem .85rem; }
 </style>
 ''', unsafe_allow_html=True)
 
@@ -302,8 +314,8 @@ def _is_owner():
     return bool(u and u.get("role")=="owner")
 
 def _safe_display_name(u):
-    if not u: return "ChapLife User"
-    return u.get("display_name") or u.get("username") or "ChapLife User"
+    if not u: return "LifeMode User"
+    return u.get("display_name") or u.get("username") or "LifeMode User"
 
 
 def _personal_display_name():
@@ -465,7 +477,7 @@ def _shared_trip_actor():
     """Return the shared-trip identity without exposing anyone's private DB."""
     u=_current_user()
     if not u:
-        return {"ref":"","member_id":None,"name":"ChapLife User","is_owner":False}
+        return {"ref":"","member_id":None,"name":"LifeMode User","is_owner":False}
     if _is_owner():
         ref=f"owner:{u.get('username') or u.get('id') or 'chaplife'}"
         return {"ref":ref,"member_id":None,"name":_safe_display_name(u),"is_owner":True}
@@ -2707,6 +2719,89 @@ def cloud_logout():
               "_cloud_loaded","_cloud_last_sync","_cloud_sync_error"]:
         st.session_state.pop(k,None)
 
+def _member_db_contains_owner_data():
+    """Detect legacy member blobs that were contaminated with the owner's private workspace."""
+    if not st.session_state.get("_chaplife_member_id"):
+        return False
+    path=current_db_path()
+    if not path.exists():
+        return False
+    try:
+        c=sqlite3.connect(path)
+        # A member private DB should never contain a local owner profile.
+        try:
+            if c.execute("SELECT 1 FROM app_users WHERE role='owner' OR lower(username)=? LIMIT 1",(OWNER_USERNAME.lower(),)).fetchone():
+                c.close(); return True
+        except sqlite3.OperationalError:
+            pass
+        # These markers are owner-only budget imports from the original workspace.
+        try:
+            if c.execute("SELECT 1 FROM chaplife_seed_state WHERE seed_key IN (?,?) LIMIT 1",
+                         ("budget_sheet_2026_08_29_v1","recurring_due_dates_from_sept4_v1")).fetchone():
+                c.close(); return True
+        except sqlite3.OperationalError:
+            pass
+        try:
+            if c.execute("SELECT 1 FROM paychecks WHERE note LIKE '%Budget sheet%' LIMIT 1").fetchone():
+                c.close(); return True
+        except sqlite3.OperationalError:
+            pass
+        c.close()
+    except Exception:
+        return False
+    return False
+
+def _enforce_member_private_workspace():
+    """Hard privacy boundary for regular members.
+
+    v7.2.22 intentionally performs ONE complete reset of every existing member private blob,
+    because earlier builds could copy owner data without reliable row-level markers. A clean
+    marker is stored inside the new member database. After that marker exists, the member's
+    self-entered private data is preserved normally. Shared trip data and the central member
+    account live in Supabase shared tables and are not touched by this reset.
+    """
+    member_id=st.session_state.get("_chaplife_member_id")
+    if not member_id:
+        return False
+    path=current_db_path()
+    clean_key="member_workspace_v722_clean"
+
+    # If this member database was already rebuilt by v7.2.22, never wipe it again.
+    if path.exists():
+        try:
+            c=sqlite3.connect(path)
+            has_state=c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='chaplife_seed_state'").fetchone()
+            if has_state:
+                hit=c.execute("SELECT 1 FROM chaplife_seed_state WHERE seed_key=? LIMIT 1",(clean_key,)).fetchone()
+                if hit:
+                    c.close()
+                    return False
+            c.close()
+        except Exception:
+            pass
+
+    try:
+        # Delete the entire legacy private member workspace. This is the only safe way to
+        # guarantee that untagged owner data cannot survive under another person's login.
+        for suffix in ("", "-wal", "-shm"):
+            q=Path(str(path)+suffix)
+            if q.exists(): q.unlink()
+
+        init_db()
+        c=sqlite3.connect(path)
+        c.execute("INSERT OR REPLACE INTO chaplife_seed_state(seed_key,applied_at,note) VALUES(?,?,?)",
+                  (clean_key,datetime.now().isoformat(timespec='seconds'),
+                   'Fresh private member workspace. No owner personal data copied.'))
+        c.commit(); c.close()
+
+        # Immediately replace the contaminated cloud blob with the clean member-only database.
+        cloud_push_db()
+        st.session_state["_member_workspace_privacy_rebuilt"]=True
+        return True
+    except Exception as e:
+        print("LifeMode member hard privacy reset error:",repr(e))
+        raise
+
 def cloud_auth_gate():
     owner_session=st.session_state.get("_chaplife_cloud_session")
     member_id=st.session_state.get("_chaplife_member_id")
@@ -2715,7 +2810,7 @@ def cloud_auth_gate():
     if not owner_session and not member_id and not st.session_state.get("_finish_member_setup"):
         st.markdown(
             '<div class="chap-auth-shell"><div class="chap-auth-mark">✨</div>'
-            '<h1>ChapLife</h1><p>Private, personal, and built around your life.</p></div>',
+            '<h1>LifeMode</h1><p>Your private life dashboard — personal to you.</p></div>',
             unsafe_allow_html=True
         )
 
@@ -2783,15 +2878,15 @@ def cloud_auth_gate():
 
         else:
             with st.form("simple_first_access"):
-                code=st.text_input("ChapLife access code",type="password")
+                code=st.text_input("LifeMode access code",type="password")
                 full_name=st.text_input("Your full name",placeholder="Use the name Chennel has for you")
                 go=st.form_submit_button("Continue",use_container_width=True)
                 if go:
                     expected=_shared_access_pin()
                     if not expected:
-                        st.warning("The ChapLife access code has not been set yet.")
+                        st.warning("The LifeMode access code has not been set yet.")
                     elif not hmac.compare_digest(str(code).strip(),str(expected).strip()):
-                        st.error("That ChapLife access code isn't correct.")
+                        st.error("That LifeMode access code isn't correct.")
                     elif not full_name.strip():
                         st.warning("Enter your full name.")
                     else:
@@ -2905,9 +3000,12 @@ def cloud_auth_gate():
                         pass
                 init_db()
                 cloud_push_db()
+            # Privacy boundary: never render a member session from an owner-derived blob.
+            if member_id:
+                _enforce_member_private_workspace()
             st.session_state["_cloud_loaded"]=True
         except Exception:
-            st.error("ChapLife could not load your private data.")
+            st.error("LifeMode could not load your private data.")
             if st.button("Sign out"):
                 cloud_logout()
                 st.rerun()
@@ -3899,6 +3997,74 @@ def preload_uploaded_budget_once():
     reassign_bnpl_installments()
 
 
+def purge_owner_seed_from_member_once():
+    """Remove owner-only legacy budget seed data from regular member databases.
+
+    Earlier builds accidentally ran the owner's one-time Budget sheet seed inside
+    every member's otherwise-private SQLite database. This cleanup is deliberately
+    narrow: it only removes rows carrying those legacy seed markers. It does not
+    touch member-created finance records.
+    """
+    if _is_owner() or not st.session_state.get("_chaplife_member_id"):
+        return
+    cleanup_key="member_owner_finance_seed_cleanup_v1"
+    if rows("SELECT seed_key FROM chaplife_seed_state WHERE seed_key=?",(cleanup_key,)):
+        return
+
+    c=db()
+    try:
+        c.execute("BEGIN")
+
+        # Delete installments belonging to owner-seeded BNPL purchases first.
+        seeded_bnpl_ids=[r[0] for r in c.execute(
+            "SELECT id FROM bnpl_purchases WHERE note LIKE 'Preloaded from Budget sheet%'").fetchall()]
+        if seeded_bnpl_ids:
+            marks=','.join('?' for _ in seeded_bnpl_ids)
+            c.execute(f"DELETE FROM bnpl_installments WHERE purchase_id IN ({marks})", seeded_bnpl_ids)
+            c.execute(f"DELETE FROM bnpl_purchases WHERE id IN ({marks})", seeded_bnpl_ids)
+
+        # Remove plan rows and transactions explicitly tagged as imported owner budget data.
+        c.execute("DELETE FROM paycheck_plan_items WHERE note LIKE '%Budget sheet%'")
+        c.execute("DELETE FROM finance_transactions WHERE note LIKE '%Budget sheet%'")
+
+        # Remove the specific owner paycheck seed rows. Their IDs may have been used only
+        # by the legacy imported plan/installment rows deleted above.
+        c.execute("DELETE FROM paychecks WHERE note LIKE '%Budget sheet%'")
+
+        # Owner-specific protected-money and debt snapshots.
+        c.execute("DELETE FROM roommate_ledger WHERE note LIKE 'Budget sheet note:%'")
+        c.execute("DELETE FROM debts WHERE note LIKE 'Budget sheet%'")
+
+        # Recurring due dates seeded from the owner's old budget labels.
+        c.execute("DELETE FROM recurring_due_dates WHERE note='Seeded from old budget sheet column A'")
+
+        # Clear only the old owner-seed state markers, then record the privacy cleanup.
+        c.execute("DELETE FROM chaplife_seed_state WHERE seed_key IN (?,?)",
+                  ("budget_sheet_2026_08_29_v1","recurring_due_dates_from_sept4_v1"))
+        c.execute("INSERT OR REPLACE INTO chaplife_seed_state(seed_key,applied_at,note) VALUES(?,?,?)",
+                  (cleanup_key,datetime.now().isoformat(timespec='seconds'),
+                   'Removed owner-only legacy budget seed from regular member database.'))
+        c.commit()
+    except Exception:
+        c.rollback()
+        raise
+    finally:
+        c.close()
+    _maybe_cloud_push()
+
+
+def reset_member_finance_to_zero_once():
+    """Compatibility guard only.
+
+    v7.2.22 enforces a one-time hard member-workspace reset before any page renders.
+    Once the clean marker exists, never wipe that member's self-entered data again.
+    """
+    if _is_owner() or not st.session_state.get("_chaplife_member_id"):
+        return
+    # If legacy owner contamination somehow reaches this point, rebuild the whole private workspace.
+    if _member_db_contains_owner_data():
+        _enforce_member_private_workspace()
+
 def next_monthly_due(due_day, base=None):
     base=base or date.today()
     y,m=base.year,base.month
@@ -4636,7 +4802,16 @@ def finances():
                         execute("INSERT INTO finance_providers(user_id,provider_key,display_name,active,sort_order) VALUES(?,?,?,?,?)",(owner_u["id"],pkey,pname,1,sort))
     except Exception:
         pass
-    preload_uploaded_budget_once(); seed_recurring_due_dates_once(); reassign_bnpl_installments()
+    # Owner-only legacy budget preload. Regular members must never receive the
+    # owner's paychecks, bills, debts, BNPL accounts, or protected-money records.
+    if _is_owner():
+        preload_uploaded_budget_once()
+        seed_recurring_due_dates_once()
+    else:
+        # Regular members must begin Finance with absolutely no owner financial data.
+        # The v2 reset handles older cloud blobs that may contain untagged copied rows.
+        reset_member_finance_to_zero_once()
+    reassign_bnpl_installments()
     u=_current_user()
     finance_sections=["💵 Paycheck","📝 Plan"]
     if u:
@@ -5401,7 +5576,7 @@ def food():
         with tabs[tab_index['Herbalife Bar']]:
             st.subheader('🥤 Herbalife Bar')
             st.write('Choose the Herbalife products you actually use, favorite your regulars, and combine multiple products into one shake, tea, aloe water, lemonade, or custom drink.')
-            st.caption('Product names/categories are based on the Herbalife U.S. catalog. ChapLife does not invent missing nutrition values; where a product/serving varies, the finished drink shows what still needs label verification.')
+            st.caption('Product names/categories are based on the Herbalife U.S. catalog. LifeMode does not invent missing nutrition values; where a product/serving varies, the finished drink shows what still needs label verification.')
 
             favorites=herbalife_favorites()
             category=st.selectbox('Browse category',['All']+sorted(set(p['category'] for p in HERBALIFE_CATALOG)),key='hl_category')
@@ -5502,7 +5677,7 @@ def food():
         if _food_extra_enabled('herbalife'):
             with st.container(border=True):
                 st.markdown('### 🥤 My Herbalife protein shake')
-                st.caption('Enter what you actually use. Herbalife nutrition can vary by product, flavor, serving size, liquid and add-ins, so ChapLife will use your label/recipe values instead of guessing.')
+                st.caption('Enter what you actually use. Herbalife nutrition can vary by product, flavor, serving size, liquid and add-ins, so LifeMode will use your label/recipe values instead of guessing.')
                 existing=meal_by_name('My Herbalife protein shake')
                 with st.form('herbalife_recipe'):
                     c=st.columns(2)
@@ -5903,7 +6078,7 @@ def trainer():
     with tabs[0]:
         st.subheader("Build a workout around where you are")
         c=st.columns(4)
-        weight=c[0].number_input("Current weight (lb)",min_value=50.0,max_value=500.0,value=float(profile.get("weight",180.0)),step=0.5)
+        weight=c[0].number_input("Current weight (lb)",min_value=50.0,max_value=500.0,value=float(profile.get("weight",180.0 if _is_owner() else 150.0)),step=0.5)
         gym=c[1].selectbox("Where are you working out?",list(GYM_EQUIPMENT.keys()),
                           index=list(GYM_EQUIPMENT.keys()).index(profile.get("gym","Planet Fitness")) if profile.get("gym") in GYM_EQUIPMENT else 0)
         horizon=c[2].selectbox("Build",["Today","1 Week","1 Month"])
@@ -6007,7 +6182,7 @@ def trainer():
     with tabs[3]:
         st.subheader("Weight")
         latest=rows("SELECT * FROM weight_log ORDER BY log_date DESC,id DESC LIMIT 1")
-        current=float(latest[0]["weight"]) if latest else float(profile.get("weight",180.0))
+        current=float(latest[0]["weight"]) if latest else float(profile.get("weight",180.0 if _is_owner() else 150.0))
         with st.form("weight_entry",clear_on_submit=True):
             c=st.columns(3)
             wd=c[0].date_input("Date",date.today(),format="MM/DD/YYYY")
