@@ -4012,20 +4012,20 @@ def cloud_auth_gate():
         .block-container{{
           position:fixed!important; top:50%!important; left:50%!important;
           transform:translate(-50%,-18%)!important;
-          width:min(375px,calc(100vw - 28px))!important; max-width:375px!important;
+          width:min(275px,calc(100vw - 28px))!important; max-width:275px!important;
           padding:0!important; margin:0!important; z-index:5!important;
         }}
         [data-testid="stForm"]{{background:transparent!important;border:0!important;padding:0!important;box-shadow:none!important;}}
         [data-testid="stTextInput"] input{{background:rgba(255,255,255,.96)!important;border:1px solid rgba(18,63,45,.32)!important;border-radius:12px!important;height:64px!important;min-height:64px!important;font-size:.88rem!important;box-shadow:0 3px 10px rgba(20,55,35,.08)!important;}}
         .block-container label, .block-container [data-testid="stWidgetLabel"] p{{font-size:.76rem!important;font-weight:700!important;color:#123f2d!important;line-height:1.1!important;}}
         [data-testid="stFormSubmitButton"]{{display:flex!important;justify-content:center!important;}}
-        [data-testid="stFormSubmitButton"] button{{width:310px!important;max-width:100%!important;background:#0b4c31!important;color:white!important;border:1px solid #0b4c31!important;border-radius:12px!important;height:65px!important;min-height:65px!important;font-size:.82rem!important;font-weight:800!important;box-shadow:0 3px 10px rgba(20,55,35,.10)!important;}}
+        [data-testid="stFormSubmitButton"] button{{width:210px!important;max-width:210px!important;background:#0b4c31!important;color:white!important;border:1px solid #0b4c31!important;border-radius:12px!important;height:65px!important;min-height:65px!important;font-size:.82rem!important;font-weight:800!important;box-shadow:0 3px 10px rgba(20,55,35,.10)!important;}}
         [data-testid="stFormSubmitButton"] button:hover{{background:#083b27!important;border-color:#083b27!important;}}
         .block-container [data-testid="stVerticalBlock"]{{gap:.42rem!important;}}
         @media(max-width:700px){{
           .stApp{{background-size:auto 100vh;background-position:center center;}}
-          .block-container{{transform:translate(-50%,-15%)!important;width:min(375px,calc(100vw - 24px))!important;max-width:375px!important;}}
-          [data-testid="stFormSubmitButton"] button{{width:min(310px,calc(100vw - 52px))!important;}}
+          .block-container{{transform:translate(-50%,-15%)!important;width:min(275px,calc(100vw - 24px))!important;max-width:275px!important;}}
+          [data-testid="stFormSubmitButton"] button{{width:min(210px,calc(100vw - 52px))!important;}}
         }}
         </style>
         """,unsafe_allow_html=True)
