@@ -3797,6 +3797,47 @@ def cloud_sign_in(email,password):
         "POST",{"email":email,"password":password}
     )
 
+def _owner_auth_email_for_identity(identity):
+    """Resolve the owner's two-field login name/username to the existing Supabase Auth email.
+    Members live in chaplife_members; Supabase Auth is reserved for the private owner account.
+    """
+    key=str(identity or "").strip()
+    norm=_norm_name(key)
+    if "@" in key:
+        return key
+    if norm not in {_norm_name(OWNER_USERNAME), "chennel", "chennel chapman"}:
+        return ""
+    try:
+        data=_admin_http_json("/auth/v1/admin/users?page=1&per_page=50")
+        users=data.get("users",[]) if isinstance(data,dict) else []
+        # Prefer an explicit metadata match when present.
+        for u in users:
+            meta=u.get("user_metadata") or {}
+            candidates=[meta.get("full_name"),meta.get("name"),meta.get("display_name"),meta.get("username")]
+            if any(_norm_name(v)==norm for v in candidates if v):
+                return str(u.get("email") or "").strip()
+        # LifeMode members do not use Supabase Auth. If there is only one Auth user, it is the owner.
+        usable=[u for u in users if u.get("email")]
+        if len(usable)==1:
+            return str(usable[0].get("email") or "").strip()
+    except Exception as e:
+        print("LifeMode owner identity resolution error:",repr(e))
+    return ""
+
+def _try_owner_login(identity,password):
+    email=_owner_auth_email_for_identity(identity)
+    if not email:
+        return False
+    try:
+        session=cloud_sign_in(email,password)
+        if session and session.get("access_token"):
+            st.session_state["_chaplife_cloud_session"]=session
+            st.session_state["_cloud_loaded"]=False
+            return True
+    except Exception as e:
+        print("LifeMode owner sign-in error:",repr(e))
+    return False
+
 def cloud_sign_up(email,password):
     return _http_json(
         f"{SUPABASE_URL}/auth/v1/signup",
@@ -4046,7 +4087,9 @@ def cloud_auth_gate():
                     st.warning("Enter your full name or username and password.")
                 else:
                     person=_central_member_by_name_or_username(login_name)
-                    if not person:
+                    if not person and _try_owner_login(login_name,password):
+                        st.rerun()
+                    elif not person:
                         st.error("That name does not have LifeMode access yet. Use Request Access.")
                     elif person.get("status")=="pending":
                         st.info("Your access request is still waiting for approval.")
