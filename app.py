@@ -4019,7 +4019,7 @@ def cloud_auth_gate():
         [data-testid="stTextInput"] input{{background:rgba(255,255,255,.96)!important;border:1px solid rgba(18,63,45,.32)!important;border-radius:12px!important;height:64px!important;min-height:64px!important;font-size:.88rem!important;box-shadow:0 3px 10px rgba(20,55,35,.08)!important;}}
         .block-container label, .block-container [data-testid="stWidgetLabel"] p{{font-size:.76rem!important;font-weight:700!important;color:#123f2d!important;line-height:1.1!important;}}
         [data-testid="stFormSubmitButton"]{{display:flex!important;justify-content:center!important;}}
-        [data-testid="stFormSubmitButton"] button{{width:210px!important;max-width:210px!important;background:#0b4c31!important;color:white!important;border:1px solid #0b4c31!important;border-radius:12px!important;height:65px!important;min-height:65px!important;font-size:.82rem!important;font-weight:800!important;box-shadow:0 3px 10px rgba(20,55,35,.10)!important;}}
+        [data-testid="stFormSubmitButton"] button{{width:210px!important;max-width:210px!important;background:#0b4c31!important;color:white!important;border:1px solid #0b4c31!important;border-radius:12px!important;height:42px!important;min-height:42px!important;font-size:.82rem!important;font-weight:800!important;box-shadow:0 3px 10px rgba(20,55,35,.10)!important;}}
         [data-testid="stFormSubmitButton"] button:hover{{background:#083b27!important;border-color:#083b27!important;}}
         .block-container [data-testid="stVerticalBlock"]{{gap:.42rem!important;}}
         @media(max-width:700px){{
