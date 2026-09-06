@@ -485,6 +485,57 @@ def _shared_trip_actor():
     mid=str(u.get("id") or "")
     return {"ref":mid,"member_id":mid or None,"name":_safe_display_name(u),"is_owner":False}
 
+def _shared_owner_directory_entry():
+    """Owner identity exposed only for LifeMode collaboration pickers."""
+    default_ref=f"owner:{OWNER_USERNAME}"
+    default_name="Chennel"
+    try:
+        data=_admin_http_json(
+            "/rest/v1/chaplife_config?config_key=in.(owner_shared_ref,owner_shared_name)&select=config_key,config_value"
+        ) or []
+        vals={str(x.get("config_key")):str(x.get("config_value") or "").strip() for x in data}
+        return {"ref":vals.get("owner_shared_ref") or default_ref,
+                "name":vals.get("owner_shared_name") or default_name}
+    except Exception:
+        return {"ref":default_ref,"name":default_name}
+
+def _sync_owner_shared_directory():
+    """Keep only the owner's collaboration name/ref in the central directory."""
+    if not _is_owner():
+        return
+    actor=_shared_trip_actor()
+    for key,val in (("owner_shared_ref",actor["ref"]),("owner_shared_name",actor["name"])):
+        try:
+            _admin_http_json(
+                "/rest/v1/chaplife_config?on_conflict=config_key","POST",
+                {"config_key":key,"config_value":val,"updated_at":datetime.now().isoformat(timespec="seconds")},
+                {"Prefer":"resolution=merge-duplicates,return=minimal"}
+            )
+        except Exception:
+            pass
+
+def _trip_retained_refs(trip):
+    retained=trip.get("retained_viewer_refs") or []
+    if isinstance(retained,str):
+        try:
+            retained=json.loads(retained) if retained.strip() else []
+        except Exception:
+            retained=[x.strip() for x in retained.split(",") if x.strip()]
+    return [str(x) for x in retained if str(x).strip()]
+
+def _set_owner_trip_invite(trip, invited=True):
+    owner_dir=_shared_owner_directory_entry()
+    retained=_trip_retained_refs(trip)
+    if invited and owner_dir["ref"] not in retained:
+        retained.append(owner_dir["ref"])
+    if not invited:
+        retained=[x for x in retained if x!=owner_dir["ref"]]
+    _shared_patch(
+        "chaplife_shared_trips",
+        "id=eq."+urllib.parse.quote(str(trip["id"])),
+        {"retained_viewer_refs":retained,"updated_at":datetime.now().isoformat(timespec="seconds")}
+    )
+
 def _shared_api(table, query=""):
     suffix=("?"+query) if query else ""
     return _admin_http_json(f"/rest/v1/{table}{suffix}")
@@ -540,20 +591,24 @@ def _shared_trip_can_suggest(trip, actor=None):
     actor=actor or _shared_trip_actor()
     if _shared_trip_is_owner(trip,actor):
         return True
+    mode=trip.get("planning_mode") or "Owner only"
+    if actor.get("is_owner") and str(actor.get("ref") or "") in set(_trip_retained_refs(trip)):
+        return mode in ("Everyone can suggest","Everyone can edit")
     member=_shared_trip_member_record(trip["id"],actor.get("member_id"))
     if not member:
         return False
-    mode=trip.get("planning_mode") or "Owner only"
     return mode in ("Everyone can suggest","Everyone can edit") or bool(member.get("can_suggest"))
 
 def _shared_trip_can_edit(trip, actor=None):
     actor=actor or _shared_trip_actor()
     if _shared_trip_is_owner(trip,actor):
         return True
+    mode=trip.get("planning_mode") or "Owner only"
+    if actor.get("is_owner") and str(actor.get("ref") or "") in set(_trip_retained_refs(trip)):
+        return mode=="Everyone can edit"
     member=_shared_trip_member_record(trip["id"],actor.get("member_id"))
     if not member:
         return False
-    mode=trip.get("planning_mode") or "Owner only"
     return mode=="Everyone can edit" or bool(member.get("can_edit"))
 
 def _shared_visible_trips(actor=None):
@@ -927,15 +982,16 @@ def _transfer_shared_trip_ownership(trip, new_owner_member):
 def trips_page():
     st.title("✈️ Trips")
     st.caption(
-        "Trips are shared only with the ChapLife people invited to them. "
+        "Trips are shared only with the LifeMode people invited to them. "
         "Each person's Finance and savings choices remain private."
     )
 
     if not MULTIUSER_CONFIGURED:
-        st.warning("Shared Trips needs the ChapLife multi-user Supabase setup.")
+        st.warning("Shared Trips needs the LifeMode multi-user setup.")
         return
 
     actor=_shared_trip_actor()
+    _sync_owner_shared_directory()
 
     # ----------------------- CREATE TRIP -----------------------
     with st.expander("＋ Let’s go on a trip",expanded=False):
@@ -1200,6 +1256,7 @@ def trips_page():
                 st.markdown("#### Who can see this trip")
                 st.caption(
                     "Invite people who already have an approved LifeMode account. "
+                    "Your shared-directory name can be used for invitations without exposing private information. "
                     "Once added, the trip appears in their Trips section."
                 )
 
@@ -1218,28 +1275,37 @@ def trips_page():
                     if str(m["id"])!=str(actor.get("member_id") or "")
                     and str(m["id"]) not in current_member_ids
                 }
+                owner_dir=_shared_owner_directory_entry()
+                owner_is_trip_creator=str(trip.get("owner_ref") or "")==owner_dir["ref"]
+                owner_already_invited=owner_dir["ref"] in set(_trip_retained_refs(trip))
+                if (not actor.get("is_owner")) and (not owner_is_trip_creator) and (not owner_already_invited):
+                    choices[owner_dir["ref"]]=owner_dir["name"]
+
                 invite_ids=st.multiselect(
-                    "Add people from ChapLife",
+                    "Add people from LifeMode",
                     list(choices.keys()),
                     format_func=lambda x:choices[x],
                     key=f"central_trip_invites_{trip['id']}"
                 )
                 if st.button("Add Selected People",key=f"add_shared_people_{trip['id']}",use_container_width=True):
                     for mid in invite_ids:
-                        _shared_post(
-                            "chaplife_shared_trip_members",
-                            {
-                                "trip_id":trip["id"],
-                                "member_id":mid,
-                                "member_name":choices[mid],
-                                "rsvp":"Invited",
-                                "role":"Member",
-                                "can_suggest":trip.get("planning_mode")!="Owner only",
-                                "can_edit":trip.get("planning_mode")=="Everyone can edit"
-                            },
-                            "trip_id,member_id"
-                        )
-                    st.success("They can now see this trip in ChapLife.")
+                        if str(mid)==owner_dir["ref"]:
+                            _set_owner_trip_invite(trip,True)
+                        else:
+                            _shared_post(
+                                "chaplife_shared_trip_members",
+                                {
+                                    "trip_id":trip["id"],
+                                    "member_id":mid,
+                                    "member_name":choices[mid],
+                                    "rsvp":"Invited",
+                                    "role":"Member",
+                                    "can_suggest":trip.get("planning_mode")!="Owner only",
+                                    "can_edit":trip.get("planning_mode")=="Everyone can edit"
+                                },
+                                "trip_id,member_id"
+                            )
+                    st.success("They can now see this trip in LifeMode.")
                     st.rerun()
 
                 st.markdown("#### People on this trip")
@@ -1270,6 +1336,15 @@ def trips_page():
                                 {"can_edit":not canedit}
                             )
                             st.rerun()
+
+                owner_dir=_shared_owner_directory_entry()
+                if owner_dir["ref"] in set(_trip_retained_refs(trip)) and str(trip.get("owner_ref") or "")!=owner_dir["ref"]:
+                    cols=st.columns([3,1,1])
+                    cols[0].write(f"{owner_dir['name']} · Invited")
+                    if cols[1].button("Remove",key=f"remove_shared_owner_{trip['id']}"):
+                        _set_owner_trip_invite(trip,False)
+                        st.rerun()
+                    cols[2].caption("Shared trip")
 
                 st.divider()
                 mode_opts=["Owner only","Everyone can suggest","Everyone can edit"]
@@ -2827,10 +2902,10 @@ def cloud_auth_gate():
           position:fixed!important;
           top:50%!important;
           left:50%!important;
-          transform:translate(-50%,-43%)!important;
-          width:min(430px,calc(100vw - 28px))!important;
-          max-width:430px!important;
-          max-height:72vh!important;
+          transform:translate(-50%,-46%)!important;
+          width:min(350px,calc(100vw - 28px))!important;
+          max-width:350px!important;
+          max-height:66vh!important;
           overflow-y:auto!important;
           padding:0!important;
           margin:0!important;
@@ -2838,17 +2913,17 @@ def cloud_auth_gate():
           scrollbar-width:none;
         }}
         .block-container::-webkit-scrollbar{{display:none;}}
-        .chap-login-title{{text-align:center;background:rgba(245,245,232,.92);backdrop-filter:blur(14px);border:1px solid rgba(35,91,54,.35);border-bottom:0;border-radius:24px 24px 0 0;padding:.8rem .9rem .28rem;color:#103f2d;box-shadow:0 14px 34px rgba(25,52,31,.14);}}
-        .chap-login-title h2{{font-family:Georgia,serif;font-size:1.62rem;margin:.03rem 0;color:#123f2d;}}
-        .chap-login-title p{{font-size:.9rem;margin:.12rem 0 .35rem;color:#385546;}}
-        [data-testid="stForm"]{{background:rgba(245,245,232,.94)!important;backdrop-filter:blur(16px);border:1px solid rgba(35,91,54,.35)!important;border-top:0!important;border-radius:0 0 24px 24px!important;padding:.75rem 1rem 1rem!important;box-shadow:0 14px 34px rgba(25,52,31,.14)!important;}}
-        [data-testid="stTextInput"] input{{background:rgba(255,255,255,.95)!important;border:1px solid rgba(32,93,55,.22)!important;border-radius:12px!important;min-height:42px!important;}}
-        [data-testid="stFormSubmitButton"] button{{background:linear-gradient(90deg,#0b4c31,#0a5a38)!important;color:white!important;border:0!important;border-radius:14px!important;min-height:46px!important;font-size:.98rem!important;font-weight:750!important;}}
-        [data-testid="stSegmentedControl"]{{background:rgba(245,245,232,.94);padding:.3rem;border-radius:14px;margin:0 0 .42rem 0;}}
+        .chap-login-title{{text-align:center;background:rgba(245,245,232,.92);backdrop-filter:blur(14px);border:1px solid rgba(35,91,54,.35);border-bottom:0;border-radius:20px 20px 0 0;padding:.55rem .7rem .18rem;color:#103f2d;box-shadow:0 12px 28px rgba(25,52,31,.12);}}
+        .chap-login-title h2{{font-family:Georgia,serif;font-size:1.35rem;margin:.02rem 0;color:#123f2d;}}
+        .chap-login-title p{{font-size:.78rem;margin:.08rem 0 .22rem;color:#385546;}}
+        [data-testid="stForm"]{{background:rgba(245,245,232,.94)!important;backdrop-filter:blur(16px);border:1px solid rgba(35,91,54,.35)!important;border-top:0!important;border-radius:0 0 20px 20px!important;padding:.5rem .75rem .7rem!important;box-shadow:0 12px 28px rgba(25,52,31,.12)!important;}}
+        [data-testid="stTextInput"] input{{background:rgba(255,255,255,.95)!important;border:1px solid rgba(32,93,55,.22)!important;border-radius:10px!important;min-height:36px!important;}}
+        [data-testid="stFormSubmitButton"] button{{background:linear-gradient(90deg,#0b4c31,#0a5a38)!important;color:white!important;border:0!important;border-radius:12px!important;min-height:38px!important;font-size:.88rem!important;font-weight:750!important;}}
+        [data-testid="stSegmentedControl"]{{background:rgba(245,245,232,.94);padding:.18rem;border-radius:12px;margin:0 0 .28rem 0;}}
         @media(max-width:700px){{
           .stApp{{background-size:auto 100vh;background-position:center center;}}
-          .block-container{{top:50%!important;transform:translate(-50%,-40%)!important;width:calc(100vw - 20px)!important;max-height:76vh!important;}}
-          .chap-login-title h2{{font-size:1.45rem;}}
+          .block-container{{top:50%!important;transform:translate(-50%,-46%)!important;width:min(350px,calc(100vw - 20px))!important;max-height:70vh!important;}}
+          .chap-login-title h2{{font-size:1.28rem;}}
         }}
         </style>
         <div class="chap-login-title"><h2>Welcome back</h2><p>Sign in to continue to your private LifeMode workspace.</p></div>
@@ -4760,7 +4835,9 @@ def _shared_held_money_panel():
     except Exception:
         members=[]
     choices={str(m.get("id")):m.get("display_name") or m.get("username") or "LifeMode user" for m in members if str(m.get("id"))!=str(actor.get("member_id") or "")}
-    if _is_owner(): choices[actor["ref"]]=actor["name"]
+    owner_dir=_shared_owner_directory_entry()
+    if not actor.get("is_owner"):
+        choices[owner_dir["ref"]]=owner_dir["name"]
     if choices:
         with st.form("shared_held_money_new",clear_on_submit=True):
             holder=st.selectbox("Who is holding the money?",list(choices.keys()),format_func=lambda x:choices[x])
