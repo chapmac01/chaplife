@@ -3559,7 +3559,27 @@ def user_access_center():
                     })
                     st.success("Password changed.")
     else:
-        st.caption("Owner login remains connected to the private cloud account.")
+        owner_row=_owner_profile_row()
+        owner_has_password=bool(str((owner_row or {}).get("password_hash") or "").strip())
+        if not owner_has_password:
+            st.info("You are currently using the initial owner key. Change it below to create your private password.")
+        with st.form("owner_change_password"):
+            old=st.text_input("Current password / initial key",type="password",key="owner_current_password")
+            p1=st.text_input("New password",type="password",key="owner_new_password")
+            p2=st.text_input("Confirm new password",type="password",key="owner_confirm_password")
+            if st.form_submit_button("Change Password",use_container_width=True):
+                if not _owner_password_matches(old):
+                    st.error("Current password or initial key doesn't match.")
+                elif len(p1)<8:
+                    st.warning("Use at least 8 characters for your new password.")
+                elif p1!=p2:
+                    st.warning("Passwords do not match.")
+                else:
+                    try:
+                        _set_owner_password(p1)
+                        st.success("Password changed. Your initial key will no longer sign you in.")
+                    except Exception:
+                        st.error("Password could not be changed.")
 
     cloud_cols=st.columns(2)
     if cloud_cols[0].button("↕ Sync now",use_container_width=True,key="profile_manual_cloud_sync"):
@@ -4349,28 +4369,60 @@ def cloud_sign_in(email,password):
     )
 
 def _owner_identity_matches(identity):
-    """Return True only for the LifeMode owner name/username.
-
-    Owner authentication is intentionally independent of Supabase Auth so the owner
-    can still enter LifeMode when Supabase Auth lookup is unavailable. The password
-    itself must stay in Streamlit Secrets and must never be committed to GitHub.
-    """
+    """Return True only for the LifeMode owner name/username."""
     norm=_norm_name(str(identity or "").strip())
     return norm in {_norm_name(OWNER_USERNAME), "chennel", "chennel chapman"}
+
+
+def _owner_profile_row():
+    """Return the local owner profile used for owner-only login settings."""
+    try:
+        rr=rows("SELECT * FROM app_users WHERE role='owner' OR lower(username)=? ORDER BY id LIMIT 1",
+                (OWNER_USERNAME.lower(),))
+        return dict(rr[0]) if rr else None
+    except Exception:
+        return None
+
+
+def _owner_initial_key():
+    """Bootstrap key for the owner. A Streamlit secret can override the built-in key."""
+    return str(_secret("OWNER_INITIAL_KEY", "1922") or "1922")
+
+
+def _owner_password_matches(password):
+    """Use the changed owner password when present; otherwise accept the initial key."""
+    owner=_owner_profile_row()
+    stored=str((owner or {}).get("password_hash") or "").strip()
+    supplied=str(password or "")
+    if stored:
+        if stored.startswith("pbkdf2_sha256$"):
+            return _member_password_ok(supplied,stored)
+        return hmac.compare_digest(_hash_password(supplied),stored)
+    return hmac.compare_digest(supplied,_owner_initial_key())
+
+
+def _set_owner_password(new_password):
+    """Replace the bootstrap key with a private owner password stored in the owner profile."""
+    owner=_owner_profile_row()
+    if not owner:
+        ensure_multiuser_seed()
+        owner=_owner_profile_row()
+    if not owner:
+        raise RuntimeError("Owner profile could not be created.")
+    execute(
+        "UPDATE app_users SET password_hash=?,updated_at=? WHERE id=?",
+        (_hash_password(new_password),datetime.now().isoformat(timespec="seconds"),owner["id"])
+    )
+
 
 def _try_owner_login(identity,password):
     if not _owner_identity_matches(identity):
         return False
-    configured_password=_secret("OWNER_LOGIN_PASSWORD") or _secret("OWNER_PASSWORD")
-    if not configured_password:
-        st.error("Owner login is not configured yet. Add OWNER_LOGIN_PASSWORD to Streamlit Secrets.")
-        return False
-    if not hmac.compare_digest(str(password or ""), configured_password):
+    if not _owner_password_matches(password):
         return False
     st.session_state["_chaplife_owner_session"]=True
-    # Owner login no longer depends on a Supabase Auth token. Keep the existing
-    # local owner workspace available immediately; cloud/member services can use
-    # Supabase separately when configured.
+    # Owner login is intentionally independent of Supabase. This guarantees access
+    # to the private local workspace even if cloud/member services are unavailable.
     st.session_state["_cloud_loaded"]=True
     return True
 
@@ -4624,8 +4676,8 @@ def cloud_auth_gate():
                 elif _owner_identity_matches(login_name):
                     if _try_owner_login(login_name,password):
                         st.rerun()
-                    elif _secret("OWNER_LOGIN_PASSWORD"):
-                        st.error("That password doesn't match this account.")
+                    else:
+                        st.error("That password or initial key doesn't match this account.")
                 else:
                     person=_central_member_by_name_or_username(login_name) if MULTIUSER_CONFIGURED else None
                     if not person:
