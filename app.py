@@ -4663,73 +4663,22 @@ def cloud_auth_gate():
         if not MULTIUSER_CONFIGURED:
             st.info("Owner login is available. Member/referral access needs the multi-user Supabase setup.")
 
-        with st.form("lifemode_name_access", clear_on_submit=False):
-            identity=st.text_input("First name & last name / Username", key="lifemode_login_identity")
-            password=st.text_input("Password", type="password", key="lifemode_login_password")
-            login_btn=st.form_submit_button("Log In",use_container_width=True)
-            request_btn=st.form_submit_button("Request Access",use_container_width=True)
-
-            login_name=str(identity or "").strip()
-            if login_btn:
-                if not login_name or not password:
-                    st.warning("Enter your full name or username and password.")
-                elif _owner_identity_matches(login_name):
-                    if _try_owner_login(login_name,password):
-                        st.rerun()
-                    else:
-                        st.error("That password or initial key doesn't match this account.")
-                else:
-                    person=_central_member_by_name_or_username(login_name) if MULTIUSER_CONFIGURED else None
-                    if not person:
-                        if MULTIUSER_CONFIGURED:
-                            st.error("That name does not have LifeMode access yet. Use Request Access.")
-                        else:
-                            st.error("Member login is temporarily unavailable because LifeMode's multi-user service is not configured.")
-                    elif person.get("status")=="pending":
-                        st.info("Your access request is still waiting for approval.")
-                    elif person.get("status")=="rejected":
-                        st.error("This access request was not approved.")
-                    elif not person.get("active",True):
-                        st.error("This account is currently disabled.")
-                    elif person.get("status")=="preapproved" or not person.get("password_hash"):
-                        st.session_state["_finish_member_setup"]=person["id"]
-                        st.rerun()
-                    elif person.get("status")!="approved":
-                        st.error("This account is not ready to sign in yet.")
-                    elif not _member_password_ok(password, person.get("password_hash","")):
-                        st.error("That password doesn't match this account.")
-                    else:
-                        st.session_state["_chaplife_member_id"]=person["id"]
-                        st.session_state["_chaplife_member_profile"]=person
-                        st.session_state["_cloud_loaded"]=False
-                        st.rerun()
-
-            if request_btn:
-                if not login_name:
-                    st.warning("Enter your first and last name or username.")
-                else:
-                    person=_central_member_by_name_or_username(login_name)
-                    if person and person.get("status")=="approved" and person.get("active",True):
-                        st.info("You already have access. Use Log In.")
-                    elif person and person.get("status")=="pending":
-                        st.info("Your access request is already waiting for approval.")
-                    elif person and person.get("status")=="preapproved":
-                        st.info("You already have access. Use Log In.")
-                    elif person and person.get("status")=="rejected":
-                        st.error("This access request was not approved.")
-                    else:
-                        st.session_state["_request_access_name"]=login_name
-                        st.rerun()
-
+        # Render exactly ONE authentication stage at a time.  Previously the
+        # login form stayed visible while the access-PIN/referral forms were
+        # appended below it, which caused the overlapping mobile layout.
         request_name=st.session_state.get("_request_access_name")
-        if request_name and not st.session_state.get("_referral_access_name"):
+        referral_name=st.session_state.get("_referral_access_name")
+
+        if request_name and not referral_name:
             st.markdown("### Enter the LifeMode access PIN")
+            st.caption(f"Access request for **{html.escape(str(request_name))}**")
             with st.form("lifemode_access_pin_check",clear_on_submit=False):
                 access_pin=st.text_input("Access PIN",type="password",key="lifemode_request_pin")
                 pin_continue=st.form_submit_button("Continue",use_container_width=True)
                 pin_cancel=st.form_submit_button("Cancel",use_container_width=True)
                 if pin_cancel:
                     st.session_state.pop("_request_access_name",None)
+                    st.session_state.pop("lifemode_request_pin",None)
                     st.rerun()
                 if pin_continue:
                     shared_pin=_shared_access_pin()
@@ -4739,11 +4688,11 @@ def cloud_auth_gate():
                         st.error("That access PIN doesn't match.")
                     else:
                         st.session_state.pop("_request_access_name",None)
+                        st.session_state.pop("lifemode_request_pin",None)
                         st.session_state["_referral_access_name"]=request_name
                         st.rerun()
 
-        referral_name=st.session_state.get("_referral_access_name")
-        if referral_name:
+        elif referral_name:
             st.markdown("### Who sent you LifeMode?")
             st.caption("Enter that LifeMode user's full name or username. Capitalization and spacing do not matter, but the spelling must match.")
             with st.form("lifemode_referral_check",clear_on_submit=False):
@@ -4752,6 +4701,7 @@ def cloud_auth_gate():
                 cancel_ref=st.form_submit_button("Cancel",use_container_width=True)
                 if cancel_ref:
                     st.session_state.pop("_referral_access_name",None)
+                    st.session_state.pop("lifemode_referrer_identity",None)
                     st.rerun()
                 if verify_ref:
                     referrer=_approved_referrer(referred_by)
@@ -4780,10 +4730,74 @@ def cloud_auth_gate():
                         )
                         if made:
                             st.session_state.pop("_referral_access_name",None)
+                            st.session_state.pop("lifemode_referrer_identity",None)
                             st.session_state["_finish_member_setup"]=made[0]["id"]
                             st.rerun()
                         else:
                             st.error("LifeMode couldn't create the account. Try again.")
+
+        else:
+            with st.form("lifemode_name_access", clear_on_submit=False):
+                identity=st.text_input("First name & last name / Username", key="lifemode_login_identity")
+                password=st.text_input("Password", type="password", key="lifemode_login_password")
+                login_btn=st.form_submit_button("Log In",use_container_width=True)
+                request_btn=st.form_submit_button("Request Access",use_container_width=True)
+
+                login_name=str(identity or "").strip()
+                if login_btn:
+                    if not login_name or not password:
+                        st.warning("Enter your full name or username and password.")
+                    elif _owner_identity_matches(login_name):
+                        if _try_owner_login(login_name,password):
+                            st.rerun()
+                        else:
+                            st.error("That password or initial key doesn't match this account.")
+                    else:
+                        person=_central_member_by_name_or_username(login_name) if MULTIUSER_CONFIGURED else None
+                        if not person:
+                            if MULTIUSER_CONFIGURED:
+                                st.error("That name does not have LifeMode access yet. Use Request Access.")
+                            else:
+                                st.error("Member login is temporarily unavailable because LifeMode's multi-user service is not configured.")
+                        elif person.get("status")=="pending":
+                            st.info("Your access request is still waiting for approval.")
+                        elif person.get("status")=="rejected":
+                            st.error("This access request was not approved.")
+                        elif not person.get("active",True):
+                            st.error("This account is currently disabled.")
+                        elif person.get("status")=="preapproved" or not person.get("password_hash"):
+                            st.session_state["_finish_member_setup"]=person["id"]
+                            st.rerun()
+                        elif person.get("status")!="approved":
+                            st.error("This account is not ready to sign in yet.")
+                        elif not _member_password_ok(password, person.get("password_hash","")):
+                            st.error("That password doesn't match this account.")
+                        else:
+                            st.session_state["_chaplife_member_id"]=person["id"]
+                            st.session_state["_chaplife_member_profile"]=person
+                            st.session_state["_cloud_loaded"]=False
+                            st.rerun()
+
+                if request_btn:
+                    if not login_name:
+                        st.warning("Enter your first and last name or username.")
+                    elif not MULTIUSER_CONFIGURED:
+                        st.error("Request Access is temporarily unavailable because LifeMode's multi-user service is not configured.")
+                    else:
+                        person=_central_member_by_name_or_username(login_name)
+                        if person and person.get("status")=="approved" and person.get("active",True):
+                            st.info("You already have access. Use Log In.")
+                        elif person and person.get("status")=="pending":
+                            st.info("Your access request is already waiting for approval.")
+                        elif person and person.get("status")=="preapproved":
+                            st.info("You already have access. Use Log In.")
+                        elif person and person.get("status")=="rejected":
+                            st.error("This access request was not approved.")
+                        else:
+                            st.session_state["_request_access_name"]=login_name
+                            # Clear the password so it never carries into the request-access flow.
+                            st.session_state.pop("lifemode_login_password",None)
+                            st.rerun()
         st.stop()
 
     # Complete first-time access or a password reset.
