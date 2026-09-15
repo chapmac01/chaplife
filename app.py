@@ -4187,8 +4187,11 @@ def _secret(name, default=""):
     except Exception:
         return default
 
-SUPABASE_URL=_secret("SUPABASE_URL").rstrip("/")
-SUPABASE_KEY=_secret("SUPABASE_PUBLISHABLE_KEY")
+# Accept either the base Supabase project URL or a URL copied with /rest/v1 on it.
+# LifeMode adds /rest/v1 and /auth/v1 itself, so normalize the secret here.
+SUPABASE_URL=re.sub(r"/rest/v1/?$","",_secret("SUPABASE_URL").strip(),flags=re.I).rstrip("/")
+# Support both the newer publishable-key name and the older SUPABASE_KEY name.
+SUPABASE_KEY=_secret("SUPABASE_PUBLISHABLE_KEY") or _secret("SUPABASE_KEY")
 SUPABASE_SERVICE_ROLE_KEY=_secret("SUPABASE_SERVICE_ROLE_KEY")
 CLOUD_CONFIGURED=bool(SUPABASE_URL and SUPABASE_KEY)
 MULTIUSER_CONFIGURED=bool(SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY)
@@ -4345,46 +4348,31 @@ def cloud_sign_in(email,password):
         "POST",{"email":email,"password":password}
     )
 
-def _owner_auth_email_for_identity(identity):
-    """Resolve the owner's two-field login name/username to the existing Supabase Auth email.
-    Members live in chaplife_members; Supabase Auth is reserved for the private owner account.
+def _owner_identity_matches(identity):
+    """Return True only for the LifeMode owner name/username.
+
+    Owner authentication is intentionally independent of Supabase Auth so the owner
+    can still enter LifeMode when Supabase Auth lookup is unavailable. The password
+    itself must stay in Streamlit Secrets and must never be committed to GitHub.
     """
-    key=str(identity or "").strip()
-    norm=_norm_name(key)
-    if "@" in key:
-        return key
-    if norm not in {_norm_name(OWNER_USERNAME), "chennel", "chennel chapman"}:
-        return ""
-    try:
-        data=_admin_http_json("/auth/v1/admin/users?page=1&per_page=50")
-        users=data.get("users",[]) if isinstance(data,dict) else []
-        # Prefer an explicit metadata match when present.
-        for u in users:
-            meta=u.get("user_metadata") or {}
-            candidates=[meta.get("full_name"),meta.get("name"),meta.get("display_name"),meta.get("username")]
-            if any(_norm_name(v)==norm for v in candidates if v):
-                return str(u.get("email") or "").strip()
-        # LifeMode members do not use Supabase Auth. If there is only one Auth user, it is the owner.
-        usable=[u for u in users if u.get("email")]
-        if len(usable)==1:
-            return str(usable[0].get("email") or "").strip()
-    except Exception as e:
-        print("LifeMode owner identity resolution error:",repr(e))
-    return ""
+    norm=_norm_name(str(identity or "").strip())
+    return norm in {_norm_name(OWNER_USERNAME), "chennel", "chennel chapman"}
 
 def _try_owner_login(identity,password):
-    email=_owner_auth_email_for_identity(identity)
-    if not email:
+    if not _owner_identity_matches(identity):
         return False
-    try:
-        session=cloud_sign_in(email,password)
-        if session and session.get("access_token"):
-            st.session_state["_chaplife_cloud_session"]=session
-            st.session_state["_cloud_loaded"]=False
-            return True
-    except Exception as e:
-        print("LifeMode owner sign-in error:",repr(e))
-    return False
+    configured_password=_secret("OWNER_LOGIN_PASSWORD") or _secret("OWNER_PASSWORD")
+    if not configured_password:
+        st.error("Owner login is not configured yet. Add OWNER_LOGIN_PASSWORD to Streamlit Secrets.")
+        return False
+    if not hmac.compare_digest(str(password or ""), configured_password):
+        return False
+    st.session_state["_chaplife_owner_session"]=True
+    # Owner login no longer depends on a Supabase Auth token. Keep the existing
+    # local owner workspace available immediately; cloud/member services can use
+    # Supabase separately when configured.
+    st.session_state["_cloud_loaded"]=True
+    return True
 
 def cloud_sign_up(email,password):
     return _http_json(
@@ -4492,7 +4480,7 @@ def _maybe_cloud_push():
         st.session_state["_cloud_sync_error"]=str(e)
 
 def cloud_logout():
-    for k in ["_chaplife_cloud_session","_chaplife_member_id","_chaplife_member_profile",
+    for k in ["_chaplife_cloud_session","_chaplife_owner_session","_chaplife_member_id","_chaplife_member_profile",
               "_cloud_loaded","_cloud_last_sync","_cloud_sync_error"]:
         st.session_state.pop(k,None)
 
@@ -4580,7 +4568,8 @@ def _enforce_member_private_workspace():
         raise
 
 def cloud_auth_gate():
-    owner_session=st.session_state.get("_chaplife_cloud_session")
+    owner_session=(st.session_state.get("_chaplife_owner_session")
+                   or st.session_state.get("_chaplife_cloud_session"))
     member_id=st.session_state.get("_chaplife_member_id")
 
     # Existing owner cloud session remains valid, but there is no public owner-only login section.
@@ -4620,8 +4609,7 @@ def cloud_auth_gate():
         """,unsafe_allow_html=True)
 
         if not MULTIUSER_CONFIGURED:
-            st.warning("LifeMode member access still needs the multi-user Supabase setup.")
-            st.stop()
+            st.info("Owner login is available. Member/referral access needs the multi-user Supabase setup.")
 
         with st.form("lifemode_name_access", clear_on_submit=False):
             identity=st.text_input("First name & last name / Username", key="lifemode_login_identity")
@@ -4633,12 +4621,18 @@ def cloud_auth_gate():
             if login_btn:
                 if not login_name or not password:
                     st.warning("Enter your full name or username and password.")
-                else:
-                    person=_central_member_by_name_or_username(login_name)
-                    if not person and _try_owner_login(login_name,password):
+                elif _owner_identity_matches(login_name):
+                    if _try_owner_login(login_name,password):
                         st.rerun()
-                    elif not person:
-                        st.error("That name does not have LifeMode access yet. Use Request Access.")
+                    elif _secret("OWNER_LOGIN_PASSWORD"):
+                        st.error("That password doesn't match this account.")
+                else:
+                    person=_central_member_by_name_or_username(login_name) if MULTIUSER_CONFIGURED else None
+                    if not person:
+                        if MULTIUSER_CONFIGURED:
+                            st.error("That name does not have LifeMode access yet. Use Request Access.")
+                        else:
+                            st.error("Member login is temporarily unavailable because LifeMode's multi-user service is not configured.")
                     elif person.get("status")=="pending":
                         st.info("Your access request is still waiting for approval.")
                     elif person.get("status")=="rejected":
